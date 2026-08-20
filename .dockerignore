@@ -1,0 +1,26 @@
+# VCS
+.git
+.gitignore
+
+# Rust (target 排除；Cargo.lock 保留——release 多阶段构建需要它做依赖缓存)
+target/
+crates/**/target/
+
+# Web (dev deps & build output; prod build is multi-stage, no need in context)
+web/node_modules
+web/dist
+web/.next
+web/coverage
+
+# Agent/config droppings
+.codex
+.agents
+.opencode
+
+# Logs & temp
+*.log
+tmp/
+*.tmp
+
+# Local dependency caches (never part of image build context)
+.cache/

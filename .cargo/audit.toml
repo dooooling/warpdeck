@@ -1,0 +1,10 @@
+# cargo audit 配置（P12-001 依赖审计）。
+# 忽略理由（记录在案）：
+# RUSTSEC-2023-0071 (rsa 0.9.10 Marvin 计时侧信道, medium, 无修复版)。
+# rsa 仅作为 sqlx-mysql/sqlx-postgres 的可选依赖出现在 Cargo.lock；
+# sqlx 已显式 default-features = false + 只开 sqlite（根 Cargo.toml），
+# cargo tree -e features -i sqlx-mysql / --target all -i rsa 均为空——
+# 该后端与 rsa 不在编译图中，不进入任何构建产物。
+# 若未来启用 mysql/postgres 后端，须先解决此 advisory。
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]

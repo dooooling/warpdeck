@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1.7
+
+# WarpDeck dev-base（计划 P2-012 / 设计 §23.3）。
+#
+# 固定开发镜像：只含运行时依赖，不构建产品二进制。
+# 只有本文件、docker/*.sh、OS 包、WARP/GOST 安装逻辑变化才允许重建。
+# 后端普通代码变化通过 bind mount Linux binary 后重启容器（§23.3）。
+#
+# 构建依赖缓存（宿主机预下载，断点续传，不入 Git）：
+#   --build-context gostcache=<dir 含 gost_3.2.6_linux_amd64.tar.gz>
+#   --build-context warpcache=<dir 含 cloudflare-warp_2026.6.880.0_amd64.deb>
+# 脚本入口：scripts/build-dev-base.ps1（自动透传缓存目录）。
+
+FROM ubuntu:24.04
+
+# ubuntu:24.04 官方镜像默认只启用 main/restricted，而 cloudflare-warp 依赖
+# universe 组件（libwebkit2gtk-4.1-0 等）。先补充源配置再装基础工具。
+# 注意：只缓存 /var/cache/apt（deb 包），不缓存 /var/lib/apt/lists——否则
+# 缓存被清后 RUN 层 CACHED 会跳过 apt-get update，导致索引为空、依赖解析失败。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    sed -i 's/^Components: main restricted$/Components: main restricted universe multiverse/' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl gnupg lsb-release dbus tini iproute2
+
+COPY docker/install-warp.sh /usr/local/bin/install-warp.sh
+COPY docker/install-gost.sh /usr/local/bin/install-gost.sh
+
+COPY --from=gostcache gost_3.2.6_linux_amd64.tar.gz /tmp/gost.tar.gz
+COPY --from=warpcache cloudflare-warp_2026.6.880.0_amd64.deb /tmp/cloudflare-warp.deb
+
+RUN bash /usr/local/bin/install-warp.sh /tmp/cloudflare-warp.deb \
+    && chmod +x /usr/local/bin/install-warp.sh /usr/local/bin/install-gost.sh
+
+RUN bash /usr/local/bin/install-gost.sh amd64 /tmp/gost.tar.gz \
+    && useradd -m -s /bin/bash warp \
+    && mkdir -p /var/lib/warpdeck /run/warpdeck \
+    && chown warp:warp /var/lib/warpdeck /run/warpdeck
+
+USER warp
+
+ENV WARPDECK_DATA_DIR=/var/lib/warpdeck
+ENV WARPDECK_RUNTIME_DIR=/run/warpdeck
+
+# 数据面运行需要：--device /dev/net/tun --cap-add NET_ADMIN（WARP 需建 tun 设备）。
+# CMD 是组件探针（非入口，dev-base 不运行业务进程）；warp-cli status 在 daemon
+# 未启动时输出错误文本但 exit 0——判别请用 scripts/smoke-dev-base.ps1。
+CMD ["bash", "-c", "warp-cli --accept-tos status; gost -V; dbus-daemon --version"]

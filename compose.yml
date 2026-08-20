@@ -1,0 +1,42 @@
+# WarpDeck release compose（P11-004）。
+# 宿主机端口映射只在这里管理（AGENTS.md：Web UI/API 不修改 host publish）。
+# 数据面要求（warp-svc 建 tun）：--device /dev/net/tun + NET_ADMIN，容器内必须 root
+# （P11-003 审计结论，镜像内无 sudo/提权机制）。
+# 镜像由 scripts/build-release.ps1 构建（tag 默认 warpdeck:local，E2E 用 warpdeck:e2e）：
+#   WARPDECK_IMAGE=warpdeck:e2e docker compose -p warpdeck-e2e up -d
+# 或直接: docker compose up -d
+
+services:
+  warpdeck:
+    image: ${WARPDECK_IMAGE:-warpdeck:local}
+    restart: unless-stopped
+    ports:
+      # §20.5: 默认只绑定宿主机 loopback（127.0.0.1），公网暴露须在 .env 显式设置：
+      #   WEB_HOST_BIND=0.0.0.0（或删除该变量并填 .env: WEB_HOST_BIND=）
+      - "${WEB_HOST_BIND:-127.0.0.1}:${WEB_HOST_PORT:-9000}:9000"
+      - "${SOCKS5_HOST_BIND:-127.0.0.1}:${SOCKS5_HOST_PORT:-11080}:11080"
+      - "${HTTP_HOST_BIND:-127.0.0.1}:${HTTP_HOST_PORT:-18080}:18080"
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    environment:
+      WARPDECK_DATA_DIR: /var/lib/warpdeck
+      WARPDECK_RUNTIME_DIR: /run/warpdeck
+      WARPDECK_UI_DIR: /app/ui
+      # 留空则首次启动自动生成 /var/lib/warpdeck/master.key（0600）。
+      WARPDECK_MASTER_KEY: ${WARPDECK_MASTER_KEY:-}
+      WARPDECK_LOG: ${WARPDECK_LOG:-info}
+    volumes:
+      - warpdeck-data:/var/lib/warpdeck
+      - warpdeck-run:/run/warpdeck
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 5
+
+volumes:
+  warpdeck-data:
+  warpdeck-run:

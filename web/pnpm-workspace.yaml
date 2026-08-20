@@ -1,0 +1,5 @@
+# pnpm v11 配置（v10+ 不再读 package.json 的 pnpm.* 字段）。
+# 依赖审计修复（P12-001）：pretty-format -> ansi-regex <5.0.1
+# 存在 ReDoS（GHSA-93q8-gq69-wqmw，high，dev-only）；强制 >=5.0.1。
+overrides:
+  ansi-regex@<5.0.1: ">=5.0.1"
