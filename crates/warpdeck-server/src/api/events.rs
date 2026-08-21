@@ -184,8 +184,6 @@ pub async fn subscribe(
 
 #[cfg(test)]
 mod tests {
-    use futures_util::StreamExt as _;
-
     use super::*;
     use crate::runtime::events::{EventBus, StateTransition};
     use crate::runtime::instance::InstanceId;

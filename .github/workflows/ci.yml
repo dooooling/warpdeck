@@ -35,6 +35,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          # 与本地开发版本一致（pnpm --version）；缺此声明 action-setup@v4 直接报错。
+          version: 11.22.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24

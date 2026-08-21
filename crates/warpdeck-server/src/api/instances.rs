@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use axum::Json;
 
 use crate::api::dto::{CreateInstanceRequest, InstanceView, PatchInstanceRequest};
-use crate::api::error::{invalid_json_body, repo_error, ApiError};
+use crate::api::error::{invalid_json_body, repo_error, ApiError, ErrorResponse};
 use crate::api::middleware::AuthUser;
 use crate::api::{ApiResult, ApiState};
 use crate::db::account::AccountMode;
@@ -204,7 +204,7 @@ async fn reject_warp_plus_rebind(
     profile: &AccountProfile,
     pid: i64,
     request_id: &String,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), ErrorResponse> {
     if profile.mode != AccountMode::WarpPlus {
         return Ok(());
     }

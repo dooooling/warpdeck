@@ -15,7 +15,7 @@ use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 use crate::auth::{CSRF_HEADER, SESSION_COOKIE};
 use crate::observability::RequestId;
@@ -96,11 +96,13 @@ fn session_id_from_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
 fn unauthorized_response(request_id: &str) -> Response {
     ApiError::Unauthorized("authentication required".to_string())
         .into_response_with(&request_id.to_string())
+        .into_response()
 }
 
 fn forbidden_response(request_id: &str) -> Response {
     ApiError::Forbidden("invalid CSRF token".to_string())
         .into_response_with(&request_id.to_string())
+        .into_response()
 }
 
 /// 认证守卫：校验 session cookie → 校验 CSRF（mutation）→ 注入 AuthUser。
