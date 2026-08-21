@@ -71,10 +71,10 @@ v0.2 起支持**多账号档案**:每个实例创建时绑定一个档案(不选
 
 备份/恢复操作数据卷整体快照(DB + master.key + WARP 注册态,恢复后免重新注册):
 
-```powershell
-.\scripts\backup-restore.ps1 backup  -Project warpdeck              # 产物在 backups/
-.\scripts\backup-restore.ps1 restore -Project warpdeck -Archive <备份文件路径>
-.\scripts\backup-restore.ps1 list
+```bash
+cargo xtask backup                          # 产物在 backups/
+cargo xtask restore --archive <备份文件路径>
+cargo xtask backups
 ```
 
 原理(见 DESIGN §28.3):先 `compose stop` 落盘 WAL,再打包 `warpdeck-data` 卷;恢复时校验归档含 `warpdeck.db` 与 `master.key` 后清卷解包并启动。备份归档含加密密钥,请妥善保管。

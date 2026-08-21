@@ -2547,8 +2547,9 @@ URL/SHA256/版本单一来源 = crates/xtask/src/versions.json
 空的索引而非版本冲突）。只缓存 `/var/cache/apt`。
 
 构建任务入口统一为 xtask（crates/xtask，`.cargo/config.toml` alias）：`cargo xtask
-release | dev-base | in-container | check-linux`；原 scripts/*.ps1 编排层已删除
-（smoke-dev-base / backup-restore / e2e 暂留至 Phase 3 移植）。
+release | dev-base | in-container | check-linux | smoke-dev-base | backup |
+restore | backups | e2e`；scripts/ 编排层已整体删除（2026-08-21 Phase 3 完成，
+仓库内不再有 PowerShell 脚本）。
 
 WARP 免费注册即可数据面冒烟，无需 WARP+ license：`registration new` ->
 `mode proxy` -> `proxy port 40000` -> `connect`，随后

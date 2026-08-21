@@ -62,6 +62,44 @@ enum Command {
         #[arg(long)]
         proxy: Option<String>,
     },
+    /// dev-base 冒烟：组件齐备性（--full 加真实数据面，需 tun/NET_ADMIN）。
+    SmokeDevBase {
+        /// 附带真实数据面验证（免费注册 -> proxy mode -> warp=on）。
+        #[arg(long, default_value_t = false)]
+        full: bool,
+    },
+    /// 备份 warpdeck-data 数据卷（compose stop -> tar -> start）。
+    Backup {
+        #[arg(long, default_value = "warpdeck")]
+        project: String,
+        /// 归档目录；缺省 <repo>/backups。
+        #[arg(long)]
+        backup_dir: Option<String>,
+    },
+    /// 从归档恢复数据卷（校验含 warpdeck.db/master.key 后清卷解包）。
+    Restore {
+        /// 归档文件路径。
+        #[arg(long)]
+        archive: std::path::PathBuf,
+        #[arg(long, default_value = "warpdeck")]
+        project: String,
+        #[arg(long)]
+        backup_dir: Option<String>,
+    },
+    /// 列出已有备份归档。
+    Backups {
+        #[arg(long)]
+        backup_dir: Option<String>,
+    },
+    /// E2E 矩阵（默认全量 1..=8；复用 warpdeck:e2e 镜像，不逐用例 build）。
+    E2e {
+        /// 只跑指定用例号，如 "2,3"。
+        #[arg(long)]
+        only: Option<String>,
+        /// 不重建环境（复用上次容器）。
+        #[arg(long, default_value_t = false)]
+        no_fresh: bool,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -81,5 +119,28 @@ fn main() -> anyhow::Result<()> {
         Command::Release { tag, proxy } => {
             tasks::release::run(&tasks::release::ReleaseArgs { tag, proxy })
         }
+        Command::SmokeDevBase { full } => {
+            tasks::smoke_dev_base::run(&tasks::smoke_dev_base::Args { full })
+        }
+        Command::Backup {
+            project,
+            backup_dir,
+        } => tasks::backup::backup(&tasks::backup::BackupArgs {
+            project,
+            backup_dir,
+        }),
+        Command::Restore {
+            archive,
+            project,
+            backup_dir,
+        } => tasks::backup::restore(&tasks::backup::RestoreArgs {
+            archive,
+            project,
+            backup_dir,
+        }),
+        Command::Backups { backup_dir } => {
+            tasks::backup::list(&tasks::backup::ListArgs { backup_dir })
+        }
+        Command::E2e { only, no_fresh } => tasks::e2e::run(&tasks::e2e::Args { only, no_fresh }),
     }
 }

@@ -52,5 +52,5 @@ ENV WARPDECK_RUNTIME_DIR=/run/warpdeck
 
 # 数据面运行需要：--device /dev/net/tun --cap-add NET_ADMIN（WARP 需建 tun 设备）。
 # CMD 是组件探针（非入口，dev-base 不运行业务进程）；warp-cli status 在 daemon
-# 未启动时输出错误文本但 exit 0——判别请用 scripts/smoke-dev-base.ps1。
+# 未启动时输出错误文本但 exit 0——判别请用 cargo xtask smoke-dev-base。
 CMD ["bash", "-c", "warp-cli --accept-tos status; gost -V; dbus-daemon --version"]
