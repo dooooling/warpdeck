@@ -59,7 +59,6 @@
 - [32. 数据目录与迁移说明](#32-数据目录与迁移说明)
 - [33. 许可证与发布边界](#33-许可证与发布边界)
 - [34. 推荐的第一批 Issue](#34-推荐的第一批-issue)
-- [35. 参考资料](#35-参考资料)
 
 ---
 
@@ -852,6 +851,18 @@ sequenceDiagram
 > （2s）有界重试；其余 connect 失败立即上浮，不消耗预算。此外 mdm.xml 必须随档
 > 下发 `warp_tunnel_protocol=masque`：org 设备档案默认 Wireguard，而 WarpProxy
 > 模式只支持 MASQUE，缺此项时连接报 `InvalidKey("Proxy mode only supports MASQUE")`。
+>
+> v0.2 后补充实测结论（2026-08-20，客户端 2026.6.880.0）：
+> - **mdm 值必须用 serde 小写名 `masque`**：warp-svc 的 plist 解析按小写枚举名匹配，
+>   写 CLI 显示名 `MASQUE` 会被**静默解析回默认 Wireguard**（LocalPolicy 日志可见
+>   `Some(Wireguard)`），随后连接报 `InvalidKey("Proxy mode only supports MASQUE")`
+>   ——失败形态与「缺键」相同，极易误诊。代码中该值硬编码于 mdm.rs，禁止改用
+>   `warp-cli tunnel protocol set` 的官方大小写值。
+> - **WarpProxy 模式对所有账号类型只支持 MASQUE**（free/warp_plus 同样受限；
+>   Cloudflare 自客户端 2025.7.106.1 起在 proxy 模式弃用 WireGuard）。free 实例
+>   经 `warp-cli mode proxy` 同样跑在 proxy 模式，因此「实例级隧道协议自选」在本
+>   架构下不可实现——已评估并否决（wireguard 选项必然导致实例 Failed）。
+>   WireGuard 仅在完整隧道模式（tun）可用，与本项目端口代理形态不兼容。
 
 ## 11.3 每实例环境
 
@@ -5167,23 +5178,6 @@ fake implementation
 ### #44 Release documentation
 
 ---
-
-# 35. 参考资料
-
-实现时以锁定版本的以下官方文档为准：
-
-```text
-Cloudflare WARP Linux Client
-GOST
-Rust
-Tokio
-Axum
-SQLx
-React
-Vite
-```
-
-不要只依赖本设计文档中的命令格式长期不变；外部 CLI 行为升级时，应该由 Adapter 层吸收变化。
 
 ---
 
