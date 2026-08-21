@@ -59,7 +59,6 @@
 - [32. 数据目录与迁移说明](#32-数据目录与迁移说明)
 - [33. 许可证与发布边界](#33-许可证与发布边界)
 - [34. 推荐的第一批 Issue](#34-推荐的第一批-issue)
-- [35. 参考资料](#35-参考资料)
 
 ---
 
@@ -5179,23 +5178,6 @@ fake implementation
 ### #44 Release documentation
 
 ---
-
-# 35. 参考资料
-
-实现时以锁定版本的以下官方文档为准：
-
-```text
-Cloudflare WARP Linux Client
-GOST
-Rust
-Tokio
-Axum
-SQLx
-React
-Vite
-```
-
-不要只依赖本设计文档中的命令格式长期不变；外部 CLI 行为升级时，应该由 Adapter 层吸收变化。
 
 ---
 
