@@ -4566,7 +4566,11 @@ actual user deployment problems
           注册前 `warp-cli connect` 报 MissingRegistration——flow 仅对该签名在 60s
           预算内按 2s 有界重试（ZT_CONNECT_RETRY_POLL_INTERVAL/WAIT_TIMEOUT）
         - mdm.xml 必须额外下发 warp_tunnel_protocol=masque（E2E-08 实测）：org
-          默认 Wireguard，而 WarpProxy 模式只支持 MASQUE，缺此项连接直接失败
+          默认 Wireguard，而 WarpProxy 模式只支持 MASQUE，缺此项连接直接失败；
+          值必须用 serde 小写名（写 CLI 大写 MASQUE 会被静默解析回 Wireguard，
+          2026-08-20 实测）。proxy 模式对所有账号类型仅支持 MASQUE（客户端
+          2025.7.106.1 起弃用 WireGuard 组合）——「实例级隧道协议自选」已评估并
+          否决，不再立项
        - 档案变更 => mark dirty via instances（rebind_profile 置 restart_pending）；
          Reconciler 按序重启（复用现有 restart path，apply 失败上浮，禁止静默成功）
   D. REST API                                   [x]
