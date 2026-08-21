@@ -1,6 +1,6 @@
 # 编译工具链镜像：在 Linux 环境内编译 warpdeck-server（x86_64-unknown-linux-gnu ELF）。
 # 与运行镜像 warpdeck-dev-base:1 解耦：本镜像只负责编译，不含 warp/gost/dbus 运行时。
-# rust:1.96 = buildpack-deps:bookworm（自带 gcc/make/pkg-config + rustup 1.96.0）。
+# rust:<ver>-bookworm = buildpack-deps:bookworm（自带 gcc/make/pkg-config + rustup；`cargo xtask in-container` 运行期动态探测 toolchain 目录，升级镜像无需改代码）。
 #
 # 用法：见 `cargo xtask in-container`（宿主 ~/.cargo/registry/cache 只读命中 +
 # target 命名卷）。

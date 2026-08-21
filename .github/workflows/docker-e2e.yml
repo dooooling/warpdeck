@@ -1,0 +1,53 @@
+# Docker E2E（AGENTS.md 纪律：PR 默认管线不构建 Docker；仅容器/网络路径变更时触发）。
+# 2026-08-21 随 xtask 迁移解锁：cargo xtask release / e2e 均跨平台，ubuntu runner 直连即可。
+#
+# 触发路径 = 镜像内容或数据面行为可能变化的文件；纯业务代码走 ci.yml 即可。
+# Zero Trust 换线（E2E-08 完整路径）：可选配置 repo secrets
+#   WARP_E2E_ZT_ORG / WARP_E2E_ZT_CLIENT_ID / WARP_E2E_ZT_CLIENT_SECRET，
+#   未配置时用例 8 自动走零凭据路径。
+
+name: Docker E2E
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'docker/**'
+      - 'compose.yml'
+      - 'compose*.yml'
+      - 'crates/xtask/**'
+      - '.github/workflows/docker-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'docker/**'
+      - 'compose.yml'
+      - 'compose*.yml'
+      - 'crates/xtask/**'
+
+concurrency:
+  group: docker-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: Docker E2E (L5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      # 版本与仓库根 rust-toolchain.toml 保持一致（升级须同步，见该文件头注）。
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # xtask 编译缓存（与 L0 ci.yml 的 key 天然隔离靠 job 名不同目录相同亦可）
+          workspaces: crates/xtask
+      - name: Build e2e image
+        run: cargo xtask release --tag warpdeck:e2e
+      - name: Run E2E matrix
+        env:
+          WARP_E2E_ZT_ORG: ${{ secrets.WARP_E2E_ZT_ORG }}
+          WARP_E2E_ZT_CLIENT_ID: ${{ secrets.WARP_E2E_ZT_CLIENT_ID }}
+          WARP_E2E_ZT_CLIENT_SECRET: ${{ secrets.WARP_E2E_ZT_CLIENT_SECRET }}
+        run: cargo xtask e2e
