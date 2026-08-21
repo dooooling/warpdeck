@@ -2,11 +2,11 @@
 
 ## Project state
 
-- **Planning only**: the repo currently contains just two authoritative design docs, no code:
+- **v0.1 released; feature development ongoing** (single `main` + short-lived branches):
   - `DESIGN_AND_DEVELOPMENT.md` — architecture, models, API, security (the *what/why*)
-  - `DEVELOPMENT_PLAN.md` — phased plan P0–P12 (the *how/sequence*)
+  - `DEVELOPMENT_PLAN.md` — phased plan P0–P12 (the *how/sequence*), all phases complete
 - Docs are written in Chinese; keep them in sync when design changes (doc change → plan update, per plan §1).
-- Development should follow the phases in order (P0 engineering baseline → P12 hardening). Do not skip phase gates. Start with P0/P1 if implementing.
+- Build/test entry points are unified under `cargo xtask` (see Commands below). Do not reintroduce ad-hoc scripts.
 
 ## Fixed design baselines (non-negotiable)
 

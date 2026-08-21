@@ -10,11 +10,14 @@
 
 （当前无有效 ADR；决策记录会依需补充。）
 
-## 运维脚本
+## 构建与运维命令
 
-- `scripts/build-release.ps1` — release 镜像构建（版本标注 `0.1.0-<git sha>`）
-- `scripts/backup-restore.ps1` — 数据卷备份 / 恢复（P12-009）
-- `scripts/e2e/run-e2e.ps1` — 真实数据面 E2E 矩阵（P11）
+统一入口 `cargo xtask`（实现见 `crates/xtask`；依赖 URL/哈希单源 `crates/xtask/src/versions.json`）：
+
+- `cargo xtask release [--proxy ...]` — release 镜像构建（版本标注 `0.1.0-<git sha>`）
+- `cargo xtask backup` / `restore --archive <p>` / `backups` — 数据卷备份 / 恢复（P12-009）
+- `cargo xtask e2e [--only N,N] [--no-fresh]` — 真实数据面 E2E 矩阵（P11）；CI 由路径触发工作流 `docker-e2e.yml`
+- 其余任务（dev-base / in-container / check-linux / smoke-dev-base）见 `AGENTS.md` Commands
 
 ## 约定
 
