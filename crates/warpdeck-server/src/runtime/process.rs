@@ -398,12 +398,29 @@ mod tests {
         let status = handle.wait().await;
         assert_eq!(status.exit_code, Some(0), "脚本正常退出");
         let content = std::fs::read_to_string(&log).unwrap();
-        assert!(content.contains("out1"), "stdout 首批写入: {content}");
-        assert!(
-            content.contains("err"),
-            "stderr 不得被后续 stdout 覆盖（双 append 修复）: {content}"
-        );
-        assert!(content.contains("out2"), "stdout 末批写入: {content}");
+        #[cfg(unix)]
+        {
+            // 回归核心：三段各 300 字节必须全部完整落盘（旧实现下 c 段从 b 段
+            // 起始处覆写，总长只剩 600 且 b 全丢）。不强制段序——sh 对重定向
+            // stdout 的缓冲策略（dash 逐写 / bash 块缓冲）会改变段间顺序，
+            // 与「是否覆盖」正交。
+            assert_eq!(content.len(), 900, "总字节数（防覆盖）: {content}");
+            assert!(content.contains(&"a".repeat(300)), "stdout 首段: {content}");
+            assert!(
+                content.contains(&"b".repeat(300)),
+                "stderr 不得被后续 stdout 覆盖（双 append 修复）: {content}"
+            );
+            assert!(content.contains(&"c".repeat(300)), "stdout 末段: {content}");
+        }
+        #[cfg(not(unix))]
+        {
+            assert!(content.contains("out1"), "stdout 首批写入: {content}");
+            assert!(
+                content.contains("err"),
+                "stderr 不得被后续 stdout 覆盖（双 append 修复）: {content}"
+            );
+            assert!(content.contains("out2"), "stdout 末批写入: {content}");
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
