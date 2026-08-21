@@ -1,3 +1,11 @@
+# Rust 工具链单一事实来源（本地 rustup 自动遵循；进仓库即锁定）。
+#
+# 升级流程（一个 PR 同步全部 4 处）：
+#   1. 本文件 channel
+#   2. .github/workflows/ci.yml 的 dtolnay/rust-toolchain@<ver>
+#   3. .github/workflows/docker-e2e.yml 同上（该 action 不读本文件，必须显式）
+#   4. Dockerfile 与 docker/Dockerfile.dev-rust 的 rust:<ver> 基础镜像
+# 注意：不要把本文件 COPY 进任何 Docker 构建阶段（避免容器内 rustup 联网装工具链，
+# 见 docker/Dockerfile.dev-rust 头注）；Docker 侧以上述基础镜像 tag 为准。
 [toolchain]
-channel = "stable"
-profile = "minimal"
+channel = "1.96.0"

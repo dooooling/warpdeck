@@ -4456,40 +4456,20 @@ CI 报告中必须可判断是哪一类。
 
 ## 25.36 推荐开发与测试命令
 
-建议提供 `justfile`：
+> 2026-08-21 修订：命令入口已统一为 **cargo xtask**（crates/xtask），本节原
+> justfile 方案作废并删除（P0 骨架期的 justfile 半数配方引用了从未落地的文件，
+> 且功能与 xtask 完全重叠）。当前等价入口：
 
-```makefile
-check:
-    cargo fmt --check
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
-    cargo test --workspace
-
-backend-test:
-    cargo test --workspace
-
-frontend-check:
-    cd web && pnpm lint
-    cd web && pnpm typecheck
-    cd web && pnpm test
-
-frontend-e2e:
-    cd web && pnpm test:e2e
-
-dev:
-    cargo run
-
-build-dev:
-    cargo build
-
-test-fake-runtime:
-    cargo test --test runtime_fake
-
-warp-real-restart:
-    docker compose -f compose.dev.yml restart warp-dev
-
-docker-e2e:
-    docker build -t warpdeck:e2e .
-    docker compose -f compose.e2e.yml up -d
+```text
+check            -> cargo xtask check 不存在；直接用：
+                    cargo fmt --check
+                    cargo clippy --workspace --all-targets --all-features -- -D warnings
+                    cargo test --workspace
+dev              -> cargo run / cargo build
+smoke(dev-base)  -> cargo xtask smoke-dev-base [--full]
+docker e2e       -> cargo xtask release --tag warpdeck:e2e && cargo xtask e2e
+backup/restore   -> cargo xtask backup | restore | backups
+linux-side check -> cargo xtask check-linux [--test]
 ```
 
 关键命令名称要让开发者能明显区分：
@@ -4501,7 +4481,7 @@ Docker E2E
 Release
 ```
 
-禁止让 `just test` 隐式 build Docker。
+禁止让测试类任务隐式 build Docker（xtask 各任务边界即此纪律的落地）。
 
 ---
 

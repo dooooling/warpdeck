@@ -403,7 +403,7 @@ rust-toolchain.toml
 
 ### P0-004 建立统一命令入口
 
-推荐 `justfile` 或 `Makefile`：
+命令入口（2026-08-21 定稿：cargo xtask；早期 justfile 方案已废弃删除）：
 
 ```text
 check
@@ -513,7 +513,7 @@ cd web && pnpm typecheck
 cargo check --workspace 通过；web/ pnpm typecheck 通过（Vite + TS strict + oxlint）
 CI: .github/workflows/ci.yml 骨架存在，未配置 Docker build
 文档入口 docs/README.md + 许可证说明（MIT + 组件许可）
-justfile 统一命令入口；migrations/ runtime/ tests/ 为占位骨架（按阶段填充）
+统一命令入口（现为 cargo xtask，见 AGENTS.md）；migrations/ runtime/ tests/ 为占位骨架（按阶段填充）
 rust-toolchain.toml 固定 stable 1.96
 ```
 
@@ -4718,7 +4718,7 @@ pnpm test
 推荐封装：
 
 ```bash
-just check
+cargo xtask（原 just check）
 ```
 
 内容只包含本地静态/测试，不隐式 build Docker。
