@@ -1,7 +1,7 @@
 # WarpDeck E2E harness（P11-006 + 007~013 matrix；v0.2 多账号档案换线 E2E-08）。
 #
 # 原则（计划 16.3）：整个 E2E 矩阵复用同一个 warpdeck:e2e 镜像，每用例不重 build。
-# 环境：Docker Desktop 本机 + 已下载 WARP/GOST 缓存（scripts/build-release.ps1 产出镜像）。
+# 环境：Docker Desktop 本机 + 已下载 WARP/GOST 缓存（cargo xtask release 产出镜像）。
 #
 # 用例:
 #   1 first-run   fresh volume + setup/login + 创建实例 + 等 Healthy（P11-007）

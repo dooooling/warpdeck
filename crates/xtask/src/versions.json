@@ -1,0 +1,13 @@
+{
+  "app_version": "0.1.0",
+  "gost": {
+    "version": "3.2.6",
+    "url": "https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz",
+    "sha256": "b39037b0380ea001fb3c0c28441c2e10bfc694f90682739a65b53e55dce5238b"
+  },
+  "warp": {
+    "version": "2026.6.880.0",
+    "url": "https://pkg.cloudflareclient.com/pool/noble/main/c/cloudflare-warp/cloudflare-warp_2026.6.880.0_amd64.deb",
+    "sha256": "648a7c7e9085f8e50d32a2adcacb0c2049fb72ebeb02ebe913becadee3ab0d4c"
+  }
+}

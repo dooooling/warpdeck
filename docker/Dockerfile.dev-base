@@ -6,12 +6,18 @@
 # 只有本文件、docker/*.sh、OS 包、WARP/GOST 安装逻辑变化才允许重建。
 # 后端普通代码变化通过 bind mount Linux binary 后重启容器（§23.3）。
 #
-# 构建依赖缓存（宿主机预下载，断点续传，不入 Git）：
-#   --build-context gostcache=<dir 含 gost_3.2.6_linux_amd64.tar.gz>
-#   --build-context warpcache=<dir 含 cloudflare-warp_2026.6.880.0_amd64.deb>
-# 脚本入口：scripts/build-dev-base.ps1（自动透传缓存目录）。
+# 依赖下载：构建期经 docker/fetch-deps.sh 拉取（断点续传 + cache mount + SHA256
+# 硬校验）；中国网络下 --build-arg DL_PROXY=socks5h://host.docker.internal:10808
+# 走宿主代理。脚本入口：`cargo xtask dev-base`。
 
 FROM ubuntu:24.04
+
+ARG GOST_TARBALL_SHA256=B39037B0380EA001FB3C0C28441C2E10BFC694F90682739A65B53E55DCE5238B
+ARG GOST_TARBALL_URL=https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz
+ARG WARP_DEB_SHA256=648A7C7E9085F8E50D32A2ADCACB0C2049FB72EBEB02EBE913BECADEE3AB0D4C
+ARG WARP_DEB_URL=https://pkg.cloudflareclient.com/pool/noble/main/c/cloudflare-warp/cloudflare-warp_2026.6.880.0_amd64.deb
+ARG GOST_VERSION_PIN=3.2.6
+ARG DL_PROXY=""
 
 # ubuntu:24.04 官方镜像默认只启用 main/restricted，而 cloudflare-warp 依赖
 # universe 组件（libwebkit2gtk-4.1-0 等）。先补充源配置再装基础工具。
@@ -23,16 +29,18 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release dbus tini iproute2
 
-COPY docker/install-warp.sh /usr/local/bin/install-warp.sh
-COPY docker/install-gost.sh /usr/local/bin/install-gost.sh
+COPY docker/install-warp.sh docker/install-gost.sh docker/fetch-deps.sh /usr/local/bin/
 
-COPY --from=gostcache gost_3.2.6_linux_amd64.tar.gz /tmp/gost.tar.gz
-COPY --from=warpcache cloudflare-warp_2026.6.880.0_amd64.deb /tmp/cloudflare-warp.deb
+RUN --mount=type=cache,target=/dl-cache,sharing=locked \
+    export DL_PROXY="${DL_PROXY}" EXPECTED_GOST_SHA256="${GOST_TARBALL_SHA256}" GOST_VERSION="${GOST_VERSION_PIN}" \
+    && bash /usr/local/bin/fetch-deps.sh "${WARP_DEB_URL}" "${WARP_DEB_SHA256}" 60000000 "/dl-cache/${WARP_DEB_URL##*/}" \
+    && cp "/dl-cache/${WARP_DEB_URL##*/}" /tmp/cloudflare-warp.deb \
+    && bash /usr/local/bin/install-warp.sh /tmp/cloudflare-warp.deb
 
-RUN bash /usr/local/bin/install-warp.sh /tmp/cloudflare-warp.deb \
-    && chmod +x /usr/local/bin/install-warp.sh /usr/local/bin/install-gost.sh
-
-RUN bash /usr/local/bin/install-gost.sh amd64 /tmp/gost.tar.gz \
+RUN --mount=type=cache,target=/dl-cache,sharing=locked \
+    export DL_PROXY="${DL_PROXY}" EXPECTED_GOST_SHA256="${GOST_TARBALL_SHA256}" GOST_VERSION="${GOST_VERSION_PIN}" \
+    && bash /usr/local/bin/fetch-deps.sh "${GOST_TARBALL_URL}" "${GOST_TARBALL_SHA256}" 9000000 "/dl-cache/${GOST_TARBALL_URL##*/}" \
+    && bash /usr/local/bin/install-gost.sh amd64 "/dl-cache/${GOST_TARBALL_URL##*/}" \
     && useradd -m -s /bin/bash warp \
     && mkdir -p /var/lib/warpdeck /run/warpdeck \
     && chown warp:warp /var/lib/warpdeck /run/warpdeck

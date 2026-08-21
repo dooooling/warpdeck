@@ -1,0 +1,4 @@
+# cargo xtask 入口（构建/检查任务，替代 scripts/*.ps1 编排层）。
+# 保持 debug 编译：xtask 迭代优先秒级；sha256 校验百 MB 文件在 debug 下仍 <2s。
+[alias]
+xtask = "run -p xtask -q --"

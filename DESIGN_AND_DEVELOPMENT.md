@@ -2524,22 +2524,31 @@ warpdeck-dev-base:1
 
 后端普通代码变化通过 bind mount / 复制本地 Linux binary 后重启容器，不创建新镜像。
 
-### 23.3.1 构建网络约束（实测 2026-08）
+### 23.3.1 构建网络约束（实测 2026-08；2026-08-21 修订）
 
-中国网络下 `pkg.cloudflareclient.com` 与 GitHub release 直连被重置/极慢，dev-base
-构建期**不得**依赖远程下载大体积文件（WARP deb ~74MB、GOST tarball ~9.6MB）。
-落地机制：
+中国网络下 `pkg.cloudflareclient.com` 与 GitHub release 直连被重置/极慢。原方案
+（宿主预下载 + `--build-context` 注入）自 2026-08-21 起改为**构建期内下载**，
+可靠性由三点保证：
 
 ```text
-宿主机断点续传下载（scripts/download-dev-base-deps.ps1，可经本机 socks5 代理）
-  -> ~/.cache/warpdeck/{gost,warp}/ 两个缓存目录（sha256 校验）
-docker build --build-context gostcache=<dir> --build-context warpcache=<dir>
-  -> Dockerfile COPY --from=... 本地安装
+docker/fetch-deps.sh（容器内执行）
+  - 断点续传循环（curl -C -，30 轮上限）
+  - 产物落 BuildKit cache mount（/dl-cache）→ 跨构建免重复下载
+  - SHA256 硬门禁：不匹配绝不安装（P12-001 纪律不变）
+代理经 --build-arg DL_PROXY=socks5h://host.docker.internal:10808 走宿主代理
+  （需代理端允许 LAN；CI/海外网络直连留空）
+URL/SHA256/版本单一来源 = crates/xtask/src/versions.json
+  - `cargo xtask release` / `dev-base` 经 --build-arg 注入 Dockerfile
+  - install-gost.sh 另收 EXPECTED_GOST_SHA256 复核同源取值
 ```
 
 `/var/lib/apt/lists` 禁止使用 BuildKit cache mount：缓存被清后 RUN 层 CACHED
 会跳过 `apt-get update`，导致索引为空、所有依赖报 "not installable"（真凶是
 空的索引而非版本冲突）。只缓存 `/var/cache/apt`。
+
+构建任务入口统一为 xtask（crates/xtask，`.cargo/config.toml` alias）：`cargo xtask
+release | dev-base | in-container | check-linux`；原 scripts/*.ps1 编排层已删除
+（smoke-dev-base / backup-restore / e2e 暂留至 Phase 3 移植）。
 
 WARP 免费注册即可数据面冒烟，无需 WARP+ license：`registration new` ->
 `mode proxy` -> `proxy port 40000` -> `connect`，随后

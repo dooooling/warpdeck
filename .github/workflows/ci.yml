@@ -11,8 +11,14 @@ on:
 
 jobs:
   backend:
-    name: Backend (L0)
-    runs-on: ubuntu-latest
+    # 双侧钉住（2026-08-21 教训）：unix cfg 代码与新版 clippy 行为只在 Linux 暴露，
+    # Windows-only 开发必然漂移；matrix 强制两侧同时编译+测试。
+    name: Backend (L0) ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

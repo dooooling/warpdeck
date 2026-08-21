@@ -2,7 +2,7 @@
 # 宿主机端口映射只在这里管理（AGENTS.md：Web UI/API 不修改 host publish）。
 # 数据面要求（warp-svc 建 tun）：--device /dev/net/tun + NET_ADMIN，容器内必须 root
 # （P11-003 审计结论，镜像内无 sudo/提权机制）。
-# 镜像由 scripts/build-release.ps1 构建（tag 默认 warpdeck:local，E2E 用 warpdeck:e2e）：
+# 镜像由 `cargo xtask release` 构建（tag 默认 warpdeck:local，E2E 用 warpdeck:e2e）：
 #   WARPDECK_IMAGE=warpdeck:e2e docker compose -p warpdeck-e2e up -d
 # 或直接: docker compose up -d
 

@@ -956,22 +956,24 @@ ca-certificates
 
 普通 Rust binary 通过 bind mount 或复制到运行容器测试。
 
-### 构建约束（实测 2026-08）
+### 构建约束（实测 2026-08；2026-08-21 修订为构建期内下载）
 
-中国网络下 `pkg.cloudflareclient.com` / GitHub release 直连被重置或极慢，
-构建期不得依赖远程下载大文件。落地做法：
+中国网络下 `pkg.cloudflareclient.com` / GitHub release 直连被重置或极慢。
+原「宿主预下载 + build-context 注入」已改为**镜像构建期内下载**，落地做法：
 
 ```text
-1. scripts/download-dev-base-deps.ps1
-   -> 宿主机断点续传（可走本机代理 socks5h://127.0.0.1:10808，仅调试用）
-   -> 产物: ~/.cache/warpdeck/gost/gost_3.2.6_linux_amd64.tar.gz
-           ~/.cache/warpdeck/warp/cloudflare-warp_*.deb（SHA256 校验）
-2. scripts/build-dev-base.ps1
-   -> --build-context gostcache / warpcache 双缓存目录
-   -> Dockerfile 内 COPY --from=... 本地安装，构建期零远程大文件
-3. /var/lib/apt/lists 不能用 BuildKit cache mount：
+1. docker/fetch-deps.sh（容器内）：断点续传 + BuildKit cache mount（/dl-cache）
+   持久 + SHA256 硬校验（不匹配绝不安装）
+2. 代理经 --build-arg DL_PROXY=socks5h://host.docker.internal:10808 注入
+   （需代理端允许 LAN）；CI/海外直连留空
+3. URL/SHA256/版本单一来源 = crates/xtask/src/versions.json，
+   `cargo xtask release | dev-base` 经 --build-arg 注入；
+   install-gost.sh 另收 EXPECTED_GOST_SHA256 复核同源取值
+4. /var/lib/apt/lists 不能用 BuildKit cache mount：
    缓存被清后 RUN 层 CACHED 跳过 apt-get update -> 索引为空 ->
    所有依赖报 "not installable"。只缓存 /var/cache/apt。
+5. 构建入口统一 `cargo xtask`（crates/xtask + .cargo/config.toml alias），
+   原 scripts/*.ps1 编排层已删除
 ```
 
 冒烟脚本 `scripts/smoke-dev-base.ps1`（免费注册即可，无需 WARP+ license）。
@@ -2757,9 +2759,10 @@ P11 完成记录（2026-08-19）：
 P11-001 多阶段 Dockerfile（node:22-slim 前端 -> rust:1-bookworm 后端 -> ubuntu:24.04 runtime）：
   runtime 含 warpdeck 二进制 + web static + cloudflare-warp_2026.6.880.0 deb + gost v3.2.6
   + dbus-daemon + tini(ENTRYPOINT) + ca-certificates + healthcheck
-P11-002 依赖 pin：GOST tarball / WARP deb 经 build-context 从宿主机缓存注入
-  （$HOME/.cache/warpdeck/{gost,warp}/，由 scripts/build-release.ps1 打包），构建期零外网下载；
-  checksum 校验归入 P12 依赖审计（构建期无法访问外部源）
+P11-002 依赖 pin（2026-08-21 修订）：GOST tarball / WARP deb 构建期内经
+  docker/fetch-deps.sh 下载（cache mount 持久 + 断点续传），URL/SHA256 由
+  `cargo xtask` 从 versions.json 经 --build-arg 注入，镜像内 sha256 硬校验；
+  checksum 校验归入 P12 依赖审计
 P11-003 最小权限审计结论：仅 warp-svc 建 /dev/net/tun 需要 root（compose 提供
   --device /dev/net/tun + cap_add NET_ADMIN，非 privileged）；镜像内不装 sudo/ssh/编译工具；
   apt lists 在 WARP/GOST 安装完成后才清理（install-warp.sh 依赖 apt 索引，见 §23.3.1）
@@ -2985,7 +2988,7 @@ P12-011 Release Docs ✅ —— README 补齐 Quick Start/Ports/Configuration/Se
   Notes/Backup/Upgrade/Troubleshooting/License&Attribution；docs/README.md 索引更新。
 P12-012 Version Metadata ✅ —— src/version.rs 统一版本解析（WARPDECK_VERSION 优先，
   health + system/version + 启动日志同一来源）；Dockerfile ARG WARDPECK_VERSION +
-  OCI LABEL（version/revision）+ ENV；build-release.ps1 注入 `0.1.0-<git sha>`
+  OCI LABEL（version/revision）+ ENV；cargo xtask release 注入 `0.1.0-<git sha>`
   （无 git 回退 dev）。
 ```
 
@@ -3002,7 +3005,7 @@ P12-012 Version Metadata ✅ —— src/version.rs 统一版本解析（WARPDECK
 [x] 文档完整（P12-011：README/docs 全量）
 [x] License/Attribution 明确（P12-014：MIT + 组件许可列明 + 再分发边界）
 [x] Release image 可复现（P12-012：版本元数据 0.1.0-<sha>；Dockerfile 与
-    build-release.ps1 固定产物，E2E 于最终镜像复跑通过）
+    cargo xtask release 固定产物，E2E 于最终镜像复跑通过）
 ```
 
 ---
