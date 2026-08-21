@@ -399,7 +399,19 @@ pub fn run(args: &Args) -> Result<()> {
             )?;
         }
         wait_proxy_listeners(90)?;
-        let trace = trace_with_auth(30).unwrap_or_default();
+        // 有界重试而非单发：实例全 healthy ≠ GOST 新配置 apply 完成，存在
+        // 「监听已开、转发链未就绪」的窗口（CI 时序比本地更易踩中）。
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut trace = String::new();
+        while Instant::now() < deadline {
+            if let Some(t) = trace_with_auth(30) {
+                if t.contains("warp=on") {
+                    trace = t;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_secs(3));
+        }
         assert(
             "socks5 trace (with auth) still warp=on after restart",
             trace.contains("warp=on"),
