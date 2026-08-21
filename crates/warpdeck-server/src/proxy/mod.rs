@@ -11,8 +11,6 @@ pub mod config;
 pub mod pool;
 pub mod supervisor;
 
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -903,6 +901,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn generated_config_is_mode_0600() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
         let h = Harness::new(1, None);
         let cfg = GostConfig::new(
             true,

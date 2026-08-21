@@ -32,7 +32,21 @@ pub enum ApiError {
 
 /// Handler 统一返回类型：错误分支返回已构建好的错误响应
 /// （`ApiError::into_response_with(&request_id)`，request_id 随契约进 body）。
-pub type ApiResult<T> = Result<T, Response>;
+///
+/// Err 用 `ErrorResponse`（Box 内核，指针大小）而非裸 `Response`：CI 新版
+/// clippy 对 async fn 也启用 `result_large_err`，裸 `Response` 体积超阈值会
+/// 在所有 handler 上报错（2026-08-21 Linux CI 实测）。
+pub type ApiResult<T> = Result<T, ErrorResponse>;
+
+/// 已构建完成的错误响应；`IntoResponse` 直通内核。
+#[derive(Debug)]
+pub struct ErrorResponse(Response);
+
+impl IntoResponse for ErrorResponse {
+    fn into_response(self) -> Response {
+        self.0
+    }
+}
 
 /// 仓储错误 → API 错误（核心错误映射；FK 违例归因于引用不存在）。
 pub(crate) fn repo_error(e: RepoError) -> ApiError {
@@ -79,7 +93,7 @@ impl ApiError {
     }
 
     /// 构造带 `request_id` 的响应（handler 从 extractor 解构 `RequestId(String)` 后传入）。
-    pub fn into_response_with(self, request_id: &String) -> Response {
+    pub fn into_response_with(self, request_id: &String) -> ErrorResponse {
         let status = match &self {
             ApiError::Validation(_) => axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Unauthorized(_) => axum::http::StatusCode::UNAUTHORIZED,
@@ -95,7 +109,7 @@ impl ApiError {
                 "request_id": request_id,
             }
         }));
-        (status, body).into_response()
+        ErrorResponse((status, body).into_response())
     }
 }
 
