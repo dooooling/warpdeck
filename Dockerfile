@@ -3,11 +3,10 @@
 #
 # 多阶段：node builder（vite build）→ rust builder（cargo release）→ runtime。
 # Runtime 含数据面全量：Cloudflare WARP（固定 deb）+ GOST（固定版本 + sha256）+ D-Bus
-# + CA + tini。构建期大文件从宿主机缓存 build-context 读（网络约束 §23.3.1，禁止
-# 构建期访问 pkg.cloudflareclient.com / github release）：
-#   --build-context gostcache=<dir 含 gost_3.2.6_linux_amd64.tar.gz>
-#   --build-context warpcache=<dir 含 cloudflare-warp_2026.6.880.0_amd64.deb>
-# 入口脚本：scripts/build-release.ps1。
+# + CA + tini。构建期经 docker/fetch-deps.sh 下载依赖（断点续传 + cache mount 持久 +
+# 强制 SHA256 校验）；中国网络下用 --build-arg DL_PROXY=socks5h://host.docker.internal:10808
+# 走宿主代理（需代理端允许 LAN），CI/海外直连即可。
+# 入口脚本：`cargo xtask release`（crates/xtask；URL/哈希/版本由 versions.json 单源注入）。
 
 # ---------- frontend builder ----------
 FROM node:22-slim AS web-builder
@@ -38,8 +37,19 @@ RUN cargo build --release --package warpdeck-server
 # ---------- runtime ----------
 FROM ubuntu:24.04 AS runtime
 
-# P12-012：版本元数据（scripts/build-release.ps1 注入 0.1.0-<git sha>）。
+# P12-012：版本元数据（`cargo xtask release` 注入 0.1.0-<git sha>）。
 ARG WARPDECK_VERSION=0.1.0-dev
+# 依赖下载与校验（P12-001，2026-08-21 起改为构建期下载）：
+# - URL/SHA256 由 `cargo xtask release` 从 crates/xtask/src/versions.json 注入
+#   （单一事实来源）；默认值仅为手动 `docker build` 兜底。
+# - DL_PROXY：构建期代理（如 socks5h://host.docker.internal:10808，需代理端允许
+#   LAN）；留空直连（CI/海外网络即可）。产物落 cache mount，跨构建免重复下载。
+ARG GOST_TARBALL_SHA256=B39037B0380EA001FB3C0C28441C2E10BFC694F90682739A65B53E55DCE5238B
+ARG WARP_DEB_SHA256=648A7C7E9085F8E50D32A2ADCACB0C2049FB72EBEB02EBE913BECADEE3AB0D4C
+ARG GOST_TARBALL_URL=https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz
+ARG WARP_DEB_URL=https://pkg.cloudflareclient.com/pool/noble/main/c/cloudflare-warp/cloudflare-warp_2026.6.880.0_amd64.deb
+ARG GOST_VERSION_PIN=3.2.6
+ARG DL_PROXY=""
 LABEL org.opencontainers.image.title="WarpDeck" \
       org.opencontainers.image.version="${WARPDECK_VERSION}" \
       org.opencontainers.image.revision="${WARPDECK_VERSION}" \
@@ -62,22 +72,22 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg lsb-release dbus tini iproute2
 
-COPY docker/install-warp.sh /usr/local/bin/install-warp.sh
-COPY docker/install-gost.sh /usr/local/bin/install-gost.sh
+COPY docker/install-warp.sh docker/install-gost.sh docker/fetch-deps.sh /usr/local/bin/
 
-# P12-001(补齐 P11-002)+ sha256 校验:与 scripts/build-release.ps1 中的 expected
-# 哈希一致(防镜像供应链被替换)。deb/tarball 用 bind mount 注入而非 COPY:
-# COPY 会留下 74MB+9.7MB 的不可消除层, mount 构建后即消失。
+# P12-001(补齐 P11-002)：构建期下载 + 双重 sha256 校验（fetch-deps.sh 对下载产物、
+# EXPECTED_GOST_SHA256 传入 install-gost.sh 复核同源取值）。deb/tarball 不落镜像层：
+# 下载在 cache mount，安装后临时副本即弃。
 # install-warp.sh 对 deb 做"剪 GUI 依赖的重打包"(webkit/LLVM/mesa 等 ~360MB),
 # apt lists 必须留到 WARP/GOST 安装之后才清理(install-warp.sh 依赖包索引)。
-RUN --mount=type=bind,from=warpcache,source=cloudflare-warp_2026.6.880.0_amd64.deb,target=/tmp/cloudflare-warp.deb,ro \
-    --mount=type=bind,from=gostcache,source=gost_3.2.6_linux_amd64.tar.gz,target=/tmp/gost.tar.gz,ro \
-    echo '648A7C7E9085F8E50D32A2ADCACB0C2049FB72EBEB02EBE913BECADEE3AB0D4C  /tmp/cloudflare-warp.deb' | sha256sum -c - \
-    && echo 'B39037B0380EA001FB3C0C28441C2E10BFC694F90682739A65B53E55DCE5238B  /tmp/gost.tar.gz' | sha256sum -c - \
+RUN --mount=type=cache,target=/dl-cache,sharing=locked \
+    export DL_PROXY="${DL_PROXY}" EXPECTED_GOST_SHA256="${GOST_TARBALL_SHA256}" GOST_VERSION="${GOST_VERSION_PIN}" \
+    && bash /usr/local/bin/fetch-deps.sh "${WARP_DEB_URL}" "${WARP_DEB_SHA256}" 60000000 "/dl-cache/${WARP_DEB_URL##*/}" \
+    && bash /usr/local/bin/fetch-deps.sh "${GOST_TARBALL_URL}" "${GOST_TARBALL_SHA256}" 9000000 "/dl-cache/${GOST_TARBALL_URL##*/}" \
     && echo 'sha256 of pinned WARP deb and GOST tarball verified' \
+    && cp "/dl-cache/${WARP_DEB_URL##*/}" /tmp/cloudflare-warp.deb \
     && bash /usr/local/bin/install-warp.sh /tmp/cloudflare-warp.deb \
-    && bash /usr/local/bin/install-gost.sh amd64 /tmp/gost.tar.gz \
-    && rm -f /usr/local/bin/install-warp.sh /usr/local/bin/install-gost.sh \
+    && bash /usr/local/bin/install-gost.sh amd64 "/dl-cache/${GOST_TARBALL_URL##*/}" \
+    && rm -f /usr/local/bin/install-warp.sh /usr/local/bin/install-gost.sh /usr/local/bin/fetch-deps.sh \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/lib/warpdeck /run/warpdeck
 

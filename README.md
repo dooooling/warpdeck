@@ -11,8 +11,9 @@ Cloudflare WARP Web Manager — 在单容器内动态管理多个 WARP 实例，
 依赖:Docker + Docker Compose(仅服务器端;管理界面为内置 Web UI,无需另装前端)。
 
 ```bash
-# 1. 构建镜像(GOST/WARP 依赖从本地缓存读取,见 scripts/build-release.ps1 头部说明)
-.\scripts\build-release.ps1          # PowerShell;Linux/macOS 请参照脚本内等价命令
+# 1. 构建镜像(GOST/WARP 依赖在构建期内自动下载并做 SHA256 校验;
+#    中国网络下加 --proxy socks5h://host.docker.internal:10808 走宿主代理)
+cargo xtask release
 
 # 2. 按需创建 .env(不创建则用安全默认值,见官方 .env.example)
 Copy-Item .env.example .env

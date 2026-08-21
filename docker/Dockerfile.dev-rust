@@ -2,7 +2,7 @@
 # 与运行镜像 warpdeck-dev-base:1 解耦：本镜像只负责编译，不含 warp/gost/dbus 运行时。
 # rust:1.96 = buildpack-deps:bookworm（自带 gcc/make/pkg-config + rustup 1.96.0）。
 #
-# 用法：见 scripts/build-in-container.ps1（宿主 ~/.cargo/registry/cache 只读命中 +
+# 用法：见 `cargo xtask in-container`（宿主 ~/.cargo/registry/cache 只读命中 +
 # target 命名卷）。
 #
 # 关键约束（踩坑记录）：
@@ -17,6 +17,13 @@ FROM rust:1.96
 # 与宿主 ~/.cargo/config.toml 同款 source replacement：aliyun sparse 镜像。
 RUN mkdir -p /usr/local/cargo \
     && printf '[source.crates-io]\nreplace-with = "aliyun"\n\n[source.aliyun]\nregistry = "sparse+https://mirrors.aliyun.com/crates.io-index/"\n' > /usr/local/cargo/config.toml
+
+# 官方镜像为 minimal profile（无 clippy/rustfmt 组件）。构建期补装；国内网络经
+# RUSTUP_PROXY 走代理（cargo xtask in-container --rebuild-image --proxy 自动注入），
+# 直连可用则留空。组件装进 pinned toolchain，运行期完全离线。
+ARG RUSTUP_PROXY=""
+RUN if [ -n "${RUSTUP_PROXY}" ]; then export https_proxy="${RUSTUP_PROXY}" http_proxy="${RUSTUP_PROXY}"; fi \
+    && rustup component add clippy rustfmt
 
 ENV CARGO_TERM_COLOR=never \
     CARGO_INCREMENTAL=1 \

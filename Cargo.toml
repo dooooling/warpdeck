@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/warpdeck-server",
+    "crates/xtask",
 ]
 resolver = "2"
 

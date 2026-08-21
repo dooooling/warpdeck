@@ -35,9 +35,17 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 
+# Build entry points (replaced scripts/*.ps1 orchestration layer; 2026-08-21)
+# GOST/WARP deps download in-image via docker/fetch-deps.sh (cache mount + forced sha256),
+# single source = crates/xtask/src/versions.json; CN network adds --proxy socks5h://host.docker.internal:10808
+cargo xtask release                 # release image (default tag warpdeck:local)
+cargo xtask dev-base                # runtime dev image warpdeck-dev-base:1 (rare)
+cargo xtask in-container            # compile Linux ELF -> target/linux-artifacts/
+cargo xtask check-linux --test      # Linux-side clippy+test; run BEFORE pushing to prevent platform drift
+
 # Frontend (web/)
 cd web && pnpm install && pnpm lint && pnpm typecheck && pnpm test
-# dev servers: cargo run / pnpm dev (justfile recipes if added)
+# dev servers: cargo run / pnpm dev
 
 # Real WARP smoke (data plane)
 curl --socks5-hostname 127.0.0.1:11080 https://cloudflare.com/cdn-cgi/trace   # expect warp=on
