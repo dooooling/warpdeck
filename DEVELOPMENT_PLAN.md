@@ -976,7 +976,7 @@ ca-certificates
    原 scripts/*.ps1 编排层已删除
 ```
 
-冒烟脚本 `scripts/smoke-dev-base.ps1`（免费注册即可，无需 WARP+ license）。
+冒烟任务 `cargo xtask smoke-dev-base --full`（免费注册即可，无需 WARP+ license）。
 
 ### 完成记录（2026-08）
 
@@ -2770,7 +2770,7 @@ P11-004 release compose：image ${WARPDECK_IMAGE:-warpdeck:local} 可注入；�
   ${WEB_HOST_PORT:-9000}/${SOCKS5_HOST_PORT:-11080}/${HTTP_HOST_PORT:-18080}；
   volumes 只持久化 warpdeck-data/warpdeck-run
 P11-005 healthcheck：curl /api/v1/health（轻量 readiness，不做外网数据面 probe）
-P11-006 E2E harness：scripts/e2e/run-e2e.ps1（单轮复用 warpdeck:e2e 镜像，7 用例）
+P11-006 E2E harness：cargo xtask e2e（2026-08-21 自 .ps1 移植；原 scripts/e2e/run-e2e.ps1）（单轮复用 warpdeck:e2e 镜像，7 用例）
   - 本机踩坑记录：Docker Compose v5 无 --remove-orphans；up -d 偶发不退出（Start-Process
     + WaitForExit 超时兜底）；PS7.4 IWR 不填充 $resp.Session 且 -SessionVariable 与
     -WebSession 互斥、Cookie 头发送不可靠（401）-> Api 全改 curl.exe -b/-c cookie jar；
@@ -2920,7 +2920,7 @@ L2 ✅ 组件测试（InstanceManager/SQLite/MockRuntime/EventBus/Reconciler/
 L3 ✅ Fake runtime 集成含于 workspace 测试；进程/gost 生命周期用例覆盖
 L4 ✅ 开发期真实 WARP（dev-base + 数据面 warp=on 烟测），本 RC 无 runtime
       /WARP 安装变更，复用既有证据
-L5 ✅ Docker E2E 全矩阵 7/7（scripts/e2e/run-e2e.ps1，最终镜像）：
+L5 ✅ Docker E2E 全矩阵 7/7（cargo xtask e2e，最终镜像）：
       fresh volume setup/first-run、实例 healthy 探活（exit_ip + colo）、
       SOCKS5 warp=on、HTTP warp=on、3 实例容器重启持久化（含 proxy auth）、
       实例 kill → pool 收缩 → auto-restart 全恢复、gost kill → reconciler
@@ -2975,7 +2975,7 @@ P12-014 Final ✅ —— 许可证终审：本仓库代码/文档采用 MIT（LI
   自身许可，SBOM 见 scans/）已写入 README「License」节与 docs/README.md、DESIGN §33。
   Gate 清单 17.3 全部通过 → 打 tag v0.1.0 正式发布。
 
-P12-009 Backup/Restore ✅ —— scripts/backup-restore.ps1（backup/restore/list）：
+P12-009 Backup/Restore ✅ —— cargo xtask backup/restore/backups（2026-08-21 自 .ps1 移植）：
   备份 = compose stop → warpdeck-data 卷整体打包（warpdeck.db + master.key +
   instances/ 注册态 + generated/ + logs/）；restore 校验归档含 db+key 后清卷解包。
   实机破坏性验证（E2E 项目）：down -v 清空 → setup/status=false → restore →

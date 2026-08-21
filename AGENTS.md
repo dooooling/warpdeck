@@ -42,6 +42,9 @@ cargo xtask release                 # release image (default tag warpdeck:local)
 cargo xtask dev-base                # runtime dev image warpdeck-dev-base:1 (rare)
 cargo xtask in-container            # compile Linux ELF -> target/linux-artifacts/
 cargo xtask check-linux --test      # Linux-side clippy+test; run BEFORE pushing to prevent platform drift
+cargo xtask smoke-dev-base --full   # dev-base component + data-plane smoke (warp=on)
+cargo xtask backup | restore --archive A | backups   # data-volume backup/restore (compose stop window)
+cargo xtask e2e                     # E2E matrix 1..=8 vs warpdeck:e2e (--only 2,3 subset)
 
 # Frontend (web/)
 cd web && pnpm install && pnpm lint && pnpm typecheck && pnpm test
