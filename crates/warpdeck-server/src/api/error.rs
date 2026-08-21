@@ -40,11 +40,11 @@ pub type ApiResult<T> = Result<T, ErrorResponse>;
 
 /// 已构建完成的错误响应；`IntoResponse` 直通内核。
 #[derive(Debug)]
-pub struct ErrorResponse(Response);
+pub struct ErrorResponse(Box<Response>);
 
 impl IntoResponse for ErrorResponse {
     fn into_response(self) -> Response {
-        self.0
+        self.0.into_response()
     }
 }
 
@@ -109,7 +109,7 @@ impl ApiError {
                 "request_id": request_id,
             }
         }));
-        ErrorResponse((status, body).into_response())
+        ErrorResponse(Box::new((status, body).into_response()))
     }
 }
 
