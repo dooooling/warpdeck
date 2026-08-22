@@ -22,7 +22,7 @@
 
 - **Never use repeated `docker build` as the dev/test loop.** Normal work: `cargo run`/`cargo test` + fixed dev-base image `warpdeck-dev-base:1` (bind-mount the built binary) + fake runtimes. Docker E2E (`docker build -t warpdeck:e2e .`) only for candidate integrations.
 - Never run `docker system prune -a --volumes` in test scripts.
-- PR CI default pipeline does **not** build Docker. Docker E2E only triggers on path changes: `Dockerfile*`, `docker/**`, `compose*.yml`, WARP/GOST install, listener/bootstrap code.
+- PR CI always builds the image and runs the E2E-01 smoke (single-instance closed loop, 1 WARP registration). Full E2E matrix (1..=8) additionally triggers on path changes: `Dockerfile*`, `docker/**`, `compose*.yml`, WARP/GOST install, listener/bootstrap code. Rationale: the image is the shipping artifact; registration frequency vs Cloudflare is the only reason the full matrix is not run on every PR.
 - Domain code must not hardcode `Command::new("warp-cli")`: go through `WarpControl` trait + `ProcessSpawner`/`Clock`/`BackoffPolicy` traits with Fake implementations, so ≥80% of tests run without real WARP.
 - Order: single instance lifecycle first, then multi-instance, then health, then GOST, then persistence/reconciler, then API/auth/UI.
 - `warp-cli` commands: `Command::new` + `.arg` (no shell string concat), timeout, capture stderr, typed errors. Port calculation centralized via typed `InstanceId`/`InternalProxyPort` with `u16` overflow checks.

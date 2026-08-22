@@ -4543,9 +4543,12 @@ pnpm test
 Fake Runtime integration
 ```
 
-**普通 PR 不自动 Docker build。**
+**2026-08-22 修订（双层 Docker 验证，取代「普通 PR 不 build」旧制）：**
 
-当 PR 修改以下内容时，才通过 path filter / label 触发 Docker E2E：
+- **每个 PR / main push 必跑 Docker Smoke**：构建镜像 + E2E-01 单实例闭环
+  （setup → 建实例 → `warp=on`）。理由：镜像即交付物，「CI 绿」必须等于
+  「该 commit 的镜像可用」；每轮只注册 1 个 WARP 账号以控制注册频率。
+- **全矩阵 E2E（1..=8）** 仅在修改以下内容时追加触发（path filter）：
 
 ```text
 Dockerfile*
@@ -4555,6 +4558,9 @@ runtime dependency installer
 WARP/GOST installation
 network/listener bootstrap
 ```
+
+> 多实例隔离 / Zero Trust 换线等重场景注册次数多，不随业务 PR 重复——这是
+> 全矩阵不进默认管线的唯一原因。
 
 ## 26.2 Main / Packaging Pipeline
 

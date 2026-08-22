@@ -16,7 +16,7 @@
 
 - `cargo xtask release [--proxy ...]` — release 镜像构建（版本标注 `0.1.0-<git sha>`）
 - `cargo xtask backup` / `restore --archive <p>` / `backups` — 数据卷备份 / 恢复（P12-009）
-- `cargo xtask e2e [--only N,N] [--no-fresh]` — 真实数据面 E2E 矩阵（P11）；CI 由路径触发工作流 `docker-e2e.yml`
+- `cargo xtask e2e [--only N,N] [--no-fresh]` — 真实数据面 E2E 矩阵（P11）；CI：每个 PR 跑 `--only 1` 冒烟，全矩阵由容器路径触发（`docker-e2e.yml` 双层设计）
 - 其余任务（dev-base / in-container / check-linux / smoke-dev-base）见 `AGENTS.md` Commands
 
 ## 约定
