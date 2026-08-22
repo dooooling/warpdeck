@@ -52,6 +52,14 @@ export interface PatchInstanceRequest {
   account_profile_id: number | null
 }
 
+/** GOST 数据面实际状态（P1 审查 #4：desired ≠ actual 必须可见）。 */
+export interface ProxyActual {
+  status: 'running' | 'stopped' | 'degraded' | 'failed'
+  pid?: number
+  exit_code?: number
+  reason?: string
+}
+
 export interface ProxyConfigView {
   socks5_enabled: boolean
   http_enabled: boolean
@@ -61,6 +69,8 @@ export interface ProxyConfigView {
   allowed_ips: string[]
   max_connections: number | null
   max_rps: number | null
+  /** GOST 实际状态（后端未追踪时缺省）。 */
+  actual?: ProxyActual
 }
 
 /** 代理配置部分更新（P8 语义：undefined = 保持；password "" = 清除，非空 = 设置/轮换）。 */
@@ -112,11 +122,20 @@ export interface InstanceCounts {
   stopped: number
 }
 
+/** 组件 operational 状态（P1 审查 #4）。 */
+export interface SystemComponents {
+  gost: string
+  gost_reason?: string
+  secret_store: string
+}
+
 export interface SystemStatusView {
   status: string
   version: string
   uptime_secs: number
   instances: InstanceCounts
+  components?: SystemComponents
+  last_apply_error?: { error: string; at_rfc3339: string }
 }
 
 export interface UserInfo {

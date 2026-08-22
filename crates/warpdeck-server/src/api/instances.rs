@@ -13,12 +13,11 @@ use axum::http::StatusCode;
 use axum::Json;
 
 use crate::api::dto::{CreateInstanceRequest, InstanceView, PatchInstanceRequest};
-use crate::api::error::{invalid_json_body, repo_error, ApiError, ErrorResponse};
+use crate::api::error::{invalid_json_body, repo_error, ApiError};
 use crate::api::middleware::AuthUser;
 use crate::api::{ApiResult, ApiState};
-use crate::db::account::AccountMode;
 use crate::db::profiles::AccountProfile;
-use crate::db::repo::DesiredState;
+use crate::db::repo::{DesiredState, RepoError};
 use crate::observability::RequestId;
 
 /// 将仓储错误映射为 API 错误。`NotFound` 语义由 handler 的 `ensure_exists`
@@ -103,21 +102,21 @@ pub async fn create(
         .validate()
         .map_err(ApiError::Validation)
         .map_err(|e| e.into_response_with(&request_id))?;
-    // v0.2：绑定档案须存在（缺省/None = 默认 free 档）；WARP+ 单实例约束（§16.9）。
+    // v0.2：绑定档案须存在（缺省/None = 默认 free 档）；WARP+ 单实例约束
+    // （§16.9）在 repo 层以 BEGIN IMMEDIATE 事务原子执行（P1 审查 #5）。
     if let Some(pid) = req.account_profile_id {
-        let profile = state
+        state
             .profiles
             .get(pid)
             .await
             .map_err(|_| ApiError::Validation("account_profile_id does not exist".to_string()))
             .map_err(|e| e.into_response_with(&request_id))?;
-        reject_warp_plus_rebind(&state, None, &profile, pid, &request_id).await?;
     }
     let spec = state
         .instances
-        .create(&name, req.account_profile_id)
+        .create_guarded(&name, req.account_profile_id)
         .await
-        .map_err(repo_error)
+        .map_err(map_instance_repo_error)
         .map_err(|e| e.into_response_with(&request_id))?;
     state.notify_change();
     let profiles = load_profiles(&state)
@@ -141,7 +140,8 @@ pub async fn update(
     body: Result<Json<PatchInstanceRequest>, axum::extract::rejection::JsonRejection>,
 ) -> ApiResult<Json<InstanceView>> {
     let id = parse_id(id).map_err(|e| e.into_response_with(&request_id))?;
-    let current = state
+    // 存在性检查（404 语义）；绑定守卫在 repo 层事务内完成。
+    let _current = state
         .instances
         .get(id)
         .await
@@ -159,26 +159,19 @@ pub async fn update(
         .map_err(|e| e.into_response_with(&request_id))?;
     let new_profile = req.account_profile_id.expect("validated non-empty");
     if let Some(pid) = new_profile {
-        let profile = state
+        state
             .profiles
             .get(pid)
             .await
             .map_err(|_| ApiError::Validation("account_profile_id does not exist".to_string()))
             .map_err(|e| e.into_response_with(&request_id))?;
-        reject_warp_plus_rebind(
-            &state,
-            current.account_profile_id,
-            &profile,
-            pid,
-            &request_id,
-        )
-        .await?;
     }
+    // §16.9 WARP+ 单实例检查与写入原子执行（P1 审查 #5）。
     state
         .instances
-        .rebind_profile(id, new_profile)
+        .rebind_profile_guarded(id, new_profile)
         .await
-        .map_err(repo_error)
+        .map_err(map_instance_repo_error)
         .map_err(|e| e.into_response_with(&request_id))?;
     state.notify_change();
     let updated = state
@@ -195,33 +188,16 @@ pub async fn update(
     Ok(Json(instance_view(&state, &profiles, &updated)))
 }
 
-/// §16.9 约束：一个 WARP+ license（档案）同一时刻只能绑定一个实例。
-/// `current_binding` 为实例改绑前的绑定（排除自身，允许"重绑同一档"幂等）。
-/// 命中返回 409 Conflict；free / zero_trust 档案不受限。
-async fn reject_warp_plus_rebind(
-    state: &ApiState,
-    current_binding: Option<i64>,
-    profile: &AccountProfile,
-    pid: i64,
-    request_id: &String,
-) -> Result<(), ErrorResponse> {
-    if profile.mode != AccountMode::WarpPlus {
-        return Ok(());
-    }
-    let used = state
-        .instances
-        .count_bound_to_profile(pid)
-        .await
-        .map_err(repo_error)
-        .map_err(|e| e.into_response_with(request_id))?;
-    let exclude_self = usize::from(current_binding == Some(pid));
-    if used > exclude_self {
-        return Err(ApiError::Conflict(format!(
+/// §16.9 原子守卫（P1 审查 #5）的仓储错误映射：`ProfileAlreadyBound` →
+/// 409 Conflict（文案与旧 pre-check 保持一致）；其余走通用 repo_error。
+/// 检查本身已下沉到 repo 层 `BEGIN IMMEDIATE` 事务内，handler 不再做计数。
+fn map_instance_repo_error(e: RepoError) -> ApiError {
+    if let RepoError::ProfileAlreadyBound(pid) = &e {
+        return ApiError::Conflict(format!(
             "WARP+ profile {pid} is already bound to another instance; one WARP+ license = one instance"
-        ))
-        .into_response_with(request_id));
+        ));
     }
-    Ok(())
+    repo_error(e)
 }
 
 /// `POST /api/v1/instances/{id}/start`（P7-006）：期望 = 运行，触发收敛。

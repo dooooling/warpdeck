@@ -167,8 +167,30 @@ export function SettingsPage() {
               <span className="mono">:18080</span> · {form.httpEnabled ? t('common.on') : t('common.off')}
             </dd>
           </div>
+          {config.data.actual ? (
+            <div>
+              <dt>{t('proxy.actualStatus')}</dt>
+              <dd>
+                <span className={`mono state-${config.data.actual.status}`}>
+                  {config.data.actual.status}
+                  {config.data.actual.pid != null ? ` (pid ${config.data.actual.pid})` : ''}
+                </span>
+                {config.data.actual.reason ? (
+                  <span className="hint"> — {config.data.actual.reason}</span>
+                ) : null}
+              </dd>
+            </div>
+          ) : null}
         </dl>
       </section>
+
+      {status.data?.last_apply_error ? (
+        <div className="form-error" role="alert">
+          <strong>{t('proxy.lastApplyError')}:</strong>{' '}
+          <span className="mono">{status.data.last_apply_error.error}</span>
+          <span className="hint"> ({status.data.last_apply_error.at_rfc3339})</span>
+        </div>
+      ) : null}
 
       {submitError ? (
         <div className="form-error" role="alert">

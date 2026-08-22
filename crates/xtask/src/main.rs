@@ -79,13 +79,11 @@ enum Command {
     },
     /// 从归档恢复数据卷（校验含 warpdeck.db/master.key 后清卷解包）。
     Restore {
-        /// 归档文件路径。
+        /// 归档文件路径（恢复的就是这个文件本身；--backup-dir 对 restore 无效）。
         #[arg(long)]
         archive: std::path::PathBuf,
         #[arg(long, default_value = "warpdeck")]
         project: String,
-        #[arg(long)]
-        backup_dir: Option<String>,
     },
     /// 列出已有备份归档。
     Backups {
@@ -130,15 +128,9 @@ fn main() -> anyhow::Result<()> {
             project,
             backup_dir,
         }),
-        Command::Restore {
-            archive,
-            project,
-            backup_dir,
-        } => tasks::backup::restore(&tasks::backup::RestoreArgs {
-            archive,
-            project,
-            backup_dir,
-        }),
+        Command::Restore { archive, project } => {
+            tasks::backup::restore(&tasks::backup::RestoreArgs { archive, project })
+        }
         Command::Backups { backup_dir } => {
             tasks::backup::list(&tasks::backup::ListArgs { backup_dir })
         }

@@ -30,7 +30,6 @@ pub struct BackupArgs {
 pub struct RestoreArgs {
     pub archive: PathBuf,
     pub project: String,
-    pub backup_dir: Option<String>,
 }
 
 pub struct ListArgs {
@@ -87,6 +86,9 @@ fn expect_volume(vol: &str) -> Result<()> {
 }
 
 fn alpine(vol: &str, dir: &Path, script: &str) -> Result<()> {
+    // 仅限**编译期常量**脚本（如固定 glob 清理）；任何含用户输入的命令必须走
+    // `alpine_argv`（P1 审查 #4：sh -c 拼接 = 容器内注入）。
+    debug_assert!(!script.contains('{'), "constant scripts only");
     common::run(
         "docker",
         &[
@@ -102,6 +104,39 @@ fn alpine(vol: &str, dir: &Path, script: &str) -> Result<()> {
             script.into(),
         ],
     )
+}
+
+/// 在 alpine 容器内以 **argv 直调 tar**（不经 shell）：宿主 `host_dir` 挂到
+/// /backup，数据卷挂到 /data。所有参数元素原样传递，无解析、无注入。
+fn alpine_tar(vol: &str, host_dir: &Path, tar_args: &[&str]) -> Result<()> {
+    let mut a: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "-v".into(),
+        format!("{vol}:/data"),
+        "-v".into(),
+        format!("{}:/backup", host_dir.display()),
+        "alpine:3.20".into(),
+        "tar".into(),
+    ];
+    a.extend(tar_args.iter().map(|s| (*s).to_string()));
+    common::run("docker", &a)
+}
+
+/// 同 [`alpine_tar`] 但捕获 stdout（用于列目录校验）。
+fn alpine_tar_capture(vol: &str, host_dir: &Path, tar_args: &[&str]) -> Result<String> {
+    let mut a: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "-v".into(),
+        format!("{vol}:/data"),
+        "-v".into(),
+        format!("{}:/backup", host_dir.display()),
+        "alpine:3.20".into(),
+        "tar".into(),
+    ];
+    a.extend(tar_args.iter().map(|s| (*s).to_string()));
+    common::capture("docker", &a)
 }
 
 fn compose(action: &str, project: &str) -> Result<()> {
@@ -128,13 +163,14 @@ pub fn backup(args: &BackupArgs) -> Result<()> {
     let name = format!("warpdeck-{}-{}.tar.gz", args.project, stamp());
     println!("== backup {vol} -> {} ==", dir.join(&name).display());
     compose("stop", &args.project)?;
-    let mut tar_cmd = format!("tar czf /backup/{name}");
+    let out = format!("/backup/{name}");
+    let mut tar_args: Vec<&str> = vec!["czf", &out];
     for ex in BACKUP_EXCLUDES {
-        // 排除模式来自编译期常量（非用户输入），无注入面。
-        tar_cmd.push_str(&format!(" --exclude='{ex}'"));
+        tar_args.push("--exclude");
+        tar_args.push(ex);
     }
-    tar_cmd.push_str(" -C /data .");
-    let res = alpine(&vol, &dir, &tar_cmd);
+    tar_args.extend(["-C", "/data", "."]);
+    let res = alpine_tar(&vol, &dir, &tar_args);
     compose("start", &args.project)?;
     res?;
     println!("OK: {}", dir.join(&name).display());
@@ -143,31 +179,23 @@ pub fn backup(args: &BackupArgs) -> Result<()> {
 
 pub fn restore(args: &RestoreArgs) -> Result<()> {
     let vol = volume(&args.project);
-    let abs = if args.archive.is_absolute() {
-        args.archive.clone()
-    } else {
-        std::env::current_dir()?.join(&args.archive)
-    };
-    ensure!(abs.is_file(), "archive not found: {}", abs.display());
-    let dir = backup_dir(&args.backup_dir)?;
+    // P1 审查 #4：canonicalize 实际归档并挂载**其父目录**——校验的就是恢复的，
+    // 杜绝「校验 A、恢复 backup_dir 下同名 B」的路径混淆；文件名只作 argv
+    // 元素传入 tar（不经 sh -c），特殊字符无注入面。
+    let abs = std::fs::canonicalize(&args.archive)
+        .with_context(|| format!("archive not found: {}", args.archive.display()))?;
+    ensure!(abs.is_file(), "not a file: {}", abs.display());
+    let dir = abs
+        .parent()
+        .with_context(|| "archive has no parent dir")?
+        .to_path_buf();
     let name = abs
         .file_name()
         .with_context(|| "no filename")?
         .to_string_lossy()
         .to_string();
-    let listing = common::capture(
-        "docker",
-        &[
-            "run".into(),
-            "--rm".into(),
-            "-v".into(),
-            format!("{}:/backup", dir.display()),
-            "alpine:3.20".into(),
-            "sh".into(),
-            "-c".into(),
-            format!("tar tzf /backup/{name}"),
-        ],
-    )?;
+    let in_backup = format!("/backup/{name}");
+    let listing = alpine_tar_capture(&vol, &dir, &["tzf", &in_backup])?;
     for required in ["warpdeck.db", "master.key"] {
         let found = listing
             .lines()
@@ -178,8 +206,9 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
     expect_volume(&vol)?;
     compose("stop", &args.project)?;
     let res = (|| -> Result<()> {
+        // 常量脚本（含 glob），无用户输入，允许 sh -c。
         alpine(&vol, &dir, "rm -rf /data/* /data/.[!.]*")?;
-        alpine(&vol, &dir, &format!("tar xzf /backup/{name} -C /data"))
+        alpine_tar(&vol, &dir, &["xzf", &in_backup, "-C", "/data"])
     })();
     compose("start", &args.project)?;
     res?;

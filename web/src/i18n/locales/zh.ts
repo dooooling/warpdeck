@@ -172,9 +172,10 @@ const zh = {
   proxy: {
     title: '代理',
     loading: '加载代理配置中',
-    empty: '暂无代理配置',
-    listeners: '监听端口',
+    empty: '暂无代理配置',    listeners: '监听端口',
     listenersHint: '以下为容器内监听端口。宿主机端口映射由 Docker Compose .env 管理 — 请编辑该文件, 不要在这里修改。',
+    actualStatus: 'GOST 实际状态',
+    lastApplyError: '最近一次代理配置应用失败',
     settings: '设置',
     socks5: 'SOCKS5',
     http: 'HTTP',
