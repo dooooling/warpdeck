@@ -100,7 +100,8 @@ pub fn escape_xml(value: &str) -> String {
 
 /// warp-svc 启动前的 mdm.xml 同步：
 /// - ZeroTrust：目录就绪后写入（覆盖）mdm.xml（含 service_mode/proxy_port）；
-///   字段缺失 = 显式失败（禁止伪装成功，AGENTS.md）。
+///   字段缺失 = 显式失败（禁止伪装成功，AGENTS.md）。文件以 0600 落盘
+///   （P0 审查 #1：内容含明文 client_secret）。
 /// - 其它模式：尽力删除可能残留的 mdm.xml（NotFound 视为成功）。
 pub async fn sync_mdm_xml(
     state_dir: &Path,
@@ -113,7 +114,7 @@ pub async fn sync_mdm_xml(
             "zero_trust profile missing organization/client id/client secret",
         ))?;
         tokio::fs::create_dir_all(state_dir).await?;
-        tokio::fs::write(&path, content).await?;
+        write_private(&path, &content).await?;
         return Ok(());
     }
     match tokio::fs::remove_file(&path).await {
@@ -122,6 +123,46 @@ pub async fn sync_mdm_xml(
         Err(e) => return Err(e.into()),
     }
     Ok(())
+}
+
+/// 以实例私有权限（0600，仅 unix）写入含 secret 的文件；mode 在创建时生效，
+/// 不存在「先默认权限出现再 chmod」的暴露窗口。非 unix（开发机编译目标）
+/// 无权限语义，退化为普通写——mdm.xml 仅在 Linux 容器内被 warp-svc 消费。
+#[cfg(unix)]
+async fn write_private(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .await?;
+    file.write_all(content.as_bytes()).await?;
+    file.flush().await
+}
+
+#[cfg(not(unix))]
+async fn write_private(path: &Path, content: &str) -> std::io::Result<()> {
+    tokio::fs::write(path, content).await
+}
+
+/// 数据面验证成功后的清理：warp-svc 已在 spawn 时读取 mdm.xml 完成注册，
+/// 含明文 client_secret 的文件不应继续驻留磁盘、更不应进入数据卷备份
+/// （P0 审查 #1）。崩溃自动重启会经 `sync_mdm_xml` 从加密密文库重新生成，
+/// 因此删除是安全的。NotFound = 已不存在（幂等）。
+pub async fn remove_after_enroll(state_dir: &Path) {
+    let path = state_dir.join(MDM_FILE);
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(
+            component = "manager",
+            error = %e,
+            "failed to remove mdm.xml after successful enroll"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -211,5 +252,27 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, MdmError::Incomplete(_)));
+    }
+
+    /// P0 审查 #1：mdm.xml 含明文 client_secret——落盘必须 0600（仅属主可读），
+    /// 注册完成后的 `remove_after_enroll` 必须移除且幂等。
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn zero_trust_file_is_private_and_removed_after_enroll() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = dir.path().join("instances").join("0").join("state");
+
+        sync_mdm_xml(&state, &zt(), 40002).await.unwrap();
+        let path = state.join(MDM_FILE);
+        assert!(path.exists());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "mdm.xml 落盘期间必须仅实例属主可读");
+
+        remove_after_enroll(&state).await;
+        assert!(!path.exists(), "注册完成后 mdm.xml 必须被移除");
+        // 幂等：再删一次不报错。
+        remove_after_enroll(&state).await;
     }
 }

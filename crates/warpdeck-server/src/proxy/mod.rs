@@ -315,19 +315,19 @@ impl GostManager {
         Ok(())
     }
 
-    /// 崩溃感知：进程已退出 → Failed（退出码 + stderr 尾部摘要）。
+    /// 崩溃感知：进程已退出 → Failed（退出码 + 稳定安全摘要）。
+    ///
+    /// P0 审查 #6 同源修订：`reason` 会经 API/SSE 直出，GOST stderr 内容不可信
+    /// （配置渲染错误可能回显凭据）。此处只保留退出码；完整 stderr 在
+    /// `gost.stderr.log`，读取路径统一过中心 redactor。
     async fn refresh_locked(&self, rt: &mut GostRuntime) {
         let Some(proc) = rt.process.as_mut() else {
             return;
         };
         if let Some(status) = proc.try_exited() {
-            // 先拷贝日志路径再 await：避免 `&GostProcess` 跨 await（非 Sync）。
-            let log_path = proc.log_path();
-            let summary = self::supervisor::read_log_tail(&log_path).await;
             let reason = format!(
-                "gost exited: exit_code={}, stderr: {}",
+                "gost exited: exit_code={}; see gost.stderr.log for details",
                 status.exit_code.map_or("?".to_string(), |c| c.to_string()),
-                summary.trim()
             );
             rt.process = None;
             rt.status = ProxyStatus::Failed {

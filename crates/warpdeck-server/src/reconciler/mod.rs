@@ -357,8 +357,14 @@ impl Reconciler {
 
     /// 代理配置同步（幂等；GostManager 内部 diff-skip）。
     ///
-    /// P8：auth_enabled 时从 secret store 取密码渲染 GOST；密码缺失视为
-    /// "未配置"（fail-open，避免代理拒绝所有连接），与 API 侧校验一致。
+    /// P8：auth_enabled 时从 secret store 取密码渲染 GOST。
+    ///
+    /// **fail-closed（P0 审查 #2 修订）**：`auth_enabled=true` 是用户声明的安全
+    /// 姿态。密码缺失（Ok(None)，状态不一致）或读取/解密失败（Err，如 master
+    /// key 损坏）时**绝不**降级为 `auth: None` 匿名代理——那等于密钥一坏、
+    /// 公网端口裸奔且 UI 毫无感知。正确动作：跳过本次 apply，保留 GOST 当前
+    /// 已验证配置（含认证）；首次应用前 GOST 处于 Stopped（无 listener），
+    /// 天然不暴露。失败以 error 级日志呈现；实际状态上浮 API/UI 由 #3 承接。
     async fn sync_proxy(&self) {
         let cfg = match self.proxy_repo.get().await {
             Ok(cfg) => cfg,
@@ -380,15 +386,21 @@ impl Reconciler {
                         password,
                     });
                 }
-                Ok(None) => warn!(
-                    component = "reconciler",
-                    "proxy auth enabled but password missing; auth left disabled"
-                ),
-                Err(e) => warn!(
-                    component = "reconciler",
-                    error = %e,
-                    "failed to read proxy password; auth left disabled"
-                ),
+                Ok(None) => {
+                    error!(
+                        component = "reconciler",
+                        "proxy auth enabled but password missing; keeping last applied config (fail-closed, no anonymous downgrade)"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    error!(
+                        component = "reconciler",
+                        error = %e,
+                        "failed to read proxy password; keeping last applied config (fail-closed, no anonymous downgrade)"
+                    );
+                    return;
+                }
             }
         }
         match self.proxy.apply_config(&settings).await {

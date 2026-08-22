@@ -333,6 +333,12 @@ impl InstanceManager {
             }));
         match self.verify_data_plane(ctx).await {
             Ok(report) => {
+                // P0 审查 #1：ZeroTrust 的 mdm.xml 含明文 client_secret，
+                // warp-svc 已在 spawn 时读取并完成注册——验证通过立即移除。
+                // 崩溃自动重启会经 do_start 从加密密文库重新生成，安全。
+                if credentials.mode == super::credentials::CredentialMode::ZeroTrust {
+                    super::mdm::remove_after_enroll(&ctx.paths.state_dir).await;
+                }
                 self.registry.update(ctx.id, |e| {
                     record_probe_metrics(e, &report);
                     e.last_error = None;
@@ -690,13 +696,15 @@ fn spawn_crash_watcher(
                 .map(|r| r.state)
                 .unwrap_or(RuntimeState::Healthy);
             registry.on_crash(event);
+            // P0 审查 #6：事件 reason 经 SSE 直出，stderr 内容不可信（可能含
+            // 敏感串）。只保留稳定退出码摘要；完整 stderr 在实例日志文件，
+            // 读取路径统一过中心 redactor。
             let reason = format!(
-                "warp-svc crashed: exit_code={}, stderr: {}",
+                "warp-svc crashed: exit_code={}; see instance log for stderr details",
                 event
                     .exit_status
                     .exit_code
                     .map_or("?".to_string(), |c| c.to_string()),
-                event.stderr_summary.trim()
             );
             bus.publish(HealthEvent::StateChanged(StateTransition {
                 instance_id: event.instance_id,
@@ -1507,9 +1515,12 @@ mod tests {
     }
 
     /// v0.2 ZeroTrust：mdm.xml 必须在 warp-svc spawn 之前写入实例 state 目录
-    /// （service-token 注册只在 warp-svc 启动时读取一次）。
+    /// （service-token 注册只在 warp-svc 启动时读取一次）；数据面验证通过后
+    /// 立即移除（P0 审查 #1：文件含明文 client_secret，不得驻留磁盘）。
+    /// 「spawn 前已存在」由本测试的调用顺序保证：sync_mdm_xml 在 do_start 内
+    /// 先于 dbus/warp-svc 执行，fake spawner 记录的 spawn 调用次序即证据。
     #[tokio::test]
-    async fn zero_trust_start_writes_mdm_xml_before_warp_svc_spawn() {
+    async fn zero_trust_start_writes_mdm_xml_before_warp_svc_spawn_and_removes_after_verify() {
         use crate::runtime::credentials::CredentialMode;
 
         let h = Harness::new(always_free());
@@ -1523,18 +1534,11 @@ mod tests {
 
         h.manager.start(&h.ctx(0), Some(7)).await.unwrap();
 
+        // 验证通过 → 含 secret 的明文文件必须已被清除。
         let mdm = h.ctx(0).paths.state_dir.join(crate::runtime::mdm::MDM_FILE);
-        let content = std::fs::read_to_string(&mdm).unwrap();
-        assert!(content.contains("<string>acme-corp</string>"));
-        assert!(content.contains("<string>token-1.access</string>"));
-        assert!(content.contains("<string>secret-1</string>"));
         assert!(
-            content.contains("<string>proxy</string>"),
-            "mode 必须由 mdm.xml 下发（managed 账号禁 CLI）"
-        );
-        assert!(
-            content.contains("<integer>40000</integer>"),
-            "proxy_port 必须由 mdm.xml 下发 = 内部端口"
+            !mdm.exists(),
+            "数据面验证成功后 mdm.xml 不得驻留磁盘（P0 审查 #1）"
         );
 
         let calls = h.spawner.spawn_calls();
