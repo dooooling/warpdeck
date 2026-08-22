@@ -15,6 +15,8 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use crate::config::{HTTP_PORT, SOCKS5_PORT};
+
 /// 节点池路由策略（DESIGN §13.2：MVP 只实现 round_robin）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoutingStrategy {
@@ -212,10 +214,10 @@ impl GostConfig {
         let mut out = String::with_capacity(2048);
         out.push_str("services:\n");
         if self.socks5_enabled {
-            out.push_str(&self.render_service("socks5", ":11080"));
+            out.push_str(&self.render_service("socks5", &format!(":{SOCKS5_PORT}")));
         }
         if self.http_enabled {
-            out.push_str(&self.render_service("http", ":18080"));
+            out.push_str(&self.render_service("http", &format!(":{HTTP_PORT}")));
         }
         if let Some(a) = &self.auth {
             out.push_str("authers:\n- name: auther-0\n  auths:\n");

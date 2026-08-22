@@ -169,9 +169,12 @@ mod tests {
             .route(
                 "/fail",
                 get(|| async {
-                    Err::<(), crate::error::AppError>(crate::error::AppError::NotFound(
-                        "nope".into(),
-                    ))
+                    (
+                        StatusCode::NOT_FOUND,
+                        axum::Json(json!({
+                            "error": {"code": "NOT_FOUND", "message": "nope"}
+                        })),
+                    )
                 }),
             )
             .layer(axum::middleware::from_fn(request_id_layer))

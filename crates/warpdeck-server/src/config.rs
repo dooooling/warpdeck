@@ -13,10 +13,8 @@ use thiserror::Error;
 /// Web UI + REST API + SSE listener port (container-internal).
 pub const WEB_PORT: u16 = 9000;
 /// SOCKS5 proxy listener port through WARP (container-internal).
-#[allow(dead_code)] // consumed in P5 (GOST proxy gateway)
 pub const SOCKS5_PORT: u16 = 11080;
 /// HTTP proxy listener port through WARP (container-internal).
-#[allow(dead_code)] // consumed in P5 (GOST proxy gateway)
 pub const HTTP_PORT: u16 = 18080;
 /// First WARP instance internal upstream port.
 pub const FIRST_WARP_PORT: u16 = 40000;

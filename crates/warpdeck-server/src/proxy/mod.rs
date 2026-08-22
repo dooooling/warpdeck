@@ -23,8 +23,8 @@ use self::pool::HealthyPoolBuilder;
 use self::supervisor::{GostProcess, GostSupervisor};
 
 /// 对外固定端口（容器内常量，DESIGN §13.3：不进入动态配置）。
-pub const SOCKS5_LISTEN_PORT: u16 = 11080;
-pub const HTTP_LISTEN_PORT: u16 = 18080;
+/// 单一来源 = `crate::config`；GOST 语境下以 LISTEN 别名重导出。
+pub use crate::config::{HTTP_PORT as HTTP_LISTEN_PORT, SOCKS5_PORT as SOCKS5_LISTEN_PORT};
 
 /// 生成的配置文件路径（DESIGN §13.2 / 计划 P5-002）。
 pub const GENERATED_DIR: &str = "generated";
