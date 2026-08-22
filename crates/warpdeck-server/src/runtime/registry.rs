@@ -82,7 +82,8 @@ pub struct InstanceRuntime {
     pub consecutive_failures: u32,
     /// 连续成功次数（P4 恢复阈值判定用；失败后清零）。
     pub consecutive_successes: u32,
-    /// 最近一次错误摘要（流程失败 / 崩溃；不含 secret，经 redactor 过滤）。
+    /// 最近一次错误摘要（流程失败 / 崩溃）。**稳定安全摘要**：不含外部进程
+    /// 输出内容（P0 审查 #6），仅结构化信息如退出码；该字段经 DTO 直出 API/SSE。
     pub last_error: Option<String>,
 }
 
@@ -197,18 +198,22 @@ impl RuntimeRegistry {
     }
 
     /// Crash Watcher 上报崩溃：Failed + 连续失败 + 错误摘要（进程已死，PID 清零）。
+    ///
+    /// P0 审查 #6（修订）：`last_error` 会经 DTO 直出 API/SSE，而外部进程
+    /// stderr 内容不可信——可能含 license/token 等敏感串。此处只保留**稳定
+    /// 安全摘要**（退出码），完整 stderr 已由 SpawnCommand 重定向进实例日志
+    /// 文件，读取路径统一过中心 redactor；需要诊断时查 `instance-{id}.log`。
     pub fn on_crash(&self, event: &CrashEvent) {
         self.update(event.instance_id, |e| {
             e.state = RuntimeState::Failed;
             e.warp_pid = None;
             e.consecutive_failures = e.consecutive_failures.saturating_add(1);
             e.last_error = Some(format!(
-                "warp-svc crashed: exit_code={}, stderr: {}",
+                "warp-svc crashed: exit_code={}; see instance log for stderr details",
                 event
                     .exit_status
                     .exit_code
                     .map_or("?".to_string(), |c| c.to_string()),
-                event.stderr_summary.trim()
             ));
         });
     }
@@ -306,6 +311,8 @@ mod tests {
         assert_eq!(e.consecutive_failures, 0);
     }
 
+    /// P0 审查 #6：last_error 是稳定安全摘要——**绝不包含 stderr 内容**
+    /// （外部进程输出不可信，可能携带 license/token；DTO/SSE 直出该字段）。
     #[test]
     fn on_crash_marks_failed_with_summary() {
         let reg = RuntimeRegistry::new();
@@ -321,9 +328,11 @@ mod tests {
         assert_eq!(e.state, RuntimeState::Failed);
         assert!(e.warp_pid.is_none(), "崩溃后 PID 不应残留");
         assert_eq!(e.consecutive_failures, 1);
-        assert_eq!(
-            e.last_error.as_deref(),
-            Some("warp-svc crashed: exit_code=9, stderr: license invalid")
+        let last = e.last_error.as_deref().unwrap_or("");
+        assert!(last.contains("exit_code=9"), "保留退出码: {last}");
+        assert!(
+            !last.contains("license invalid"),
+            "stderr 内容不得进入 last_error（P0 审查 #6）"
         );
     }
 

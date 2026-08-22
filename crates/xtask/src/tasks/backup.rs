@@ -3,6 +3,10 @@
 //!
 //! 备份 = warpdeck-data 数据卷整体快照：warpdeck.db（SQLite WAL 合并后落盘）、
 //! master.key、instances/（WARP 注册态，恢复后免重新注册）。
+//! **显式排除** instances/*/state/mdm.xml：该文件在 ZeroTrust 模式下含明文
+//! client_secret（P0 审查 #1；服务端已改为注册后即删，排除是纵深防御——
+//! 覆盖「验证未通过时文件仍在盘上」的窗口期）。恢复后的实例下次启动会从
+//! 加密密文库重新生成该文件，无需备份。reg.json 保留在备份中（免重注册）。
 //! 原则不变：备份/恢复期间 compose stop——MVP 允许停服务复制 DB，不做热备，
 //! 杜绝 WAL/内存中未落盘数据的不一致。
 //! 归档命名：warpdeck-{project}-{yyyyMMdd-HHmmss}.tar.gz。
@@ -14,6 +18,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, ensure, Context, Result};
 
 use crate::common;
+
+/// tar 排除项：ZeroTrust 明文凭据文件不进备份（P0 审查 #1 纵深防御）。
+const BACKUP_EXCLUDES: &[&str] = &["./instances/*/state/mdm.xml"];
 
 pub struct BackupArgs {
     pub project: String,
@@ -121,7 +128,13 @@ pub fn backup(args: &BackupArgs) -> Result<()> {
     let name = format!("warpdeck-{}-{}.tar.gz", args.project, stamp());
     println!("== backup {vol} -> {} ==", dir.join(&name).display());
     compose("stop", &args.project)?;
-    let res = alpine(&vol, &dir, &format!("tar czf /backup/{name} -C /data ."));
+    let mut tar_cmd = format!("tar czf /backup/{name}");
+    for ex in BACKUP_EXCLUDES {
+        // 排除模式来自编译期常量（非用户输入），无注入面。
+        tar_cmd.push_str(&format!(" --exclude='{ex}'"));
+    }
+    tar_cmd.push_str(" -C /data .");
+    let res = alpine(&vol, &dir, &tar_cmd);
     compose("start", &args.project)?;
     res?;
     println!("OK: {}", dir.join(&name).display());

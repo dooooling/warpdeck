@@ -580,8 +580,10 @@ async fn proxy_config_update_is_reflected() {
     );
 }
 
+/// P0 审查 #2（fail-closed）：auth_enabled=true 但密码缺失时，绝不应用
+/// `auth: None` 的匿名配置——跳过本次 apply，保留 GOST 当前已验证配置。
 #[tokio::test]
-async fn proxy_auth_enabled_without_password_leaves_auth_disabled() {
+async fn proxy_auth_enabled_without_password_skips_apply_fail_closed() {
     let env = TestEnv::new().await;
     let cfg = ProxyConfig {
         auth_enabled: true,
@@ -592,11 +594,48 @@ async fn proxy_auth_enabled_without_password_leaves_auth_disabled() {
 
     env.reconciler.reconcile_once().await;
 
+    assert!(
+        env.proxy.applied.lock().unwrap().is_empty(),
+        "fail-closed: password missing → no config applied, GOST stays on last safe state"
+    );
+}
+
+/// P0 审查 #2（fail-closed）：先以正确密码应用一次认证配置，随后密码读取失败
+/// （模拟解密损坏）→ 再 reconcile 时**不得**推送匿名配置覆盖已认证状态。
+#[tokio::test]
+async fn proxy_password_read_failure_keeps_last_applied_authenticated_config() {
+    let env = TestEnv::new().await;
+    let cfg = ProxyConfig {
+        auth_enabled: true,
+        proxy_username: Some("alice".into()),
+        ..ProxyConfig::default_enabled()
+    };
+    env.proxy_repo.update(&cfg).await.unwrap();
+    env.secrets
+        .set(SecretKind::ProxyPassword, "s3cret-pass")
+        .await
+        .unwrap();
+
+    env.reconciler.reconcile_once().await;
     let applied = env.proxy.applied.lock().unwrap().clone();
     assert_eq!(applied.len(), 1);
-    assert!(
-        applied[0].auth.is_none(),
-        "fail-open: no password → no auth"
+    assert!(applied[0].auth.is_some(), "首次应用必须带认证");
+
+    // 破坏密文：直接覆写为非法密文，模拟 master key 损坏 / 密文篡改。
+    // （SqliteSecretStore 读到无法解密的内容应返回 Err 而非 None。）
+    let poisoned = format!("not-a-valid-sealed-box:{}", "x".repeat(64));
+    sqlx::query("UPDATE secrets SET ciphertext = ? WHERE kind = 'proxy_password'")
+        .bind(&poisoned)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    env.reconciler.reconcile_once().await;
+    let applied = env.proxy.applied.lock().unwrap().clone();
+    assert_eq!(
+        applied.len(),
+        1,
+        "fail-closed: 解密失败后不得再推送任何配置（含匿名降级）"
     );
 }
 
