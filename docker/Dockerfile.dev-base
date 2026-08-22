@@ -8,15 +8,12 @@
 #
 # 依赖下载：构建期经 docker/fetch-deps.sh 拉取（断点续传 + cache mount + SHA256
 # 硬校验）；中国网络下 --build-arg DL_PROXY=socks5h://host.docker.internal:10808
-# 走宿主代理。脚本入口：`cargo xtask dev-base`。
+# 走宿主代理。GOST/WARP 的 URL/SHA256/版本唯一来源 = crates/xtask/src/versions.json：
+# 直接从 build context COPY 后用 jq 解析（与主 Dockerfile 同机制），不设默认值副本。
+# 脚本入口：`cargo xtask dev-base`。
 
 FROM ubuntu:24.04
 
-ARG GOST_TARBALL_SHA256=B39037B0380EA001FB3C0C28441C2E10BFC694F90682739A65B53E55DCE5238B
-ARG GOST_TARBALL_URL=https://github.com/go-gost/gost/releases/download/v3.2.6/gost_3.2.6_linux_amd64.tar.gz
-ARG WARP_DEB_SHA256=648A7C7E9085F8E50D32A2ADCACB0C2049FB72EBEB02EBE913BECADEE3AB0D4C
-ARG WARP_DEB_URL=https://pkg.cloudflareclient.com/pool/noble/main/c/cloudflare-warp/cloudflare-warp_2026.6.880.0_amd64.deb
-ARG GOST_VERSION_PIN=3.2.6
 ARG DL_PROXY=""
 
 # ubuntu:24.04 官方镜像默认只启用 main/restricted，而 cloudflare-warp 依赖
@@ -27,23 +24,39 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     sed -i 's/^Components: main restricted$/Components: main restricted universe multiverse/' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl gnupg lsb-release dbus tini iproute2
+        ca-certificates curl gnupg jq lsb-release dbus tini iproute2
 
 COPY docker/install-warp.sh docker/install-gost.sh docker/fetch-deps.sh /usr/local/bin/
 
+# versions.json 是 GOST/WARP 版本/URL/SHA256 的唯一来源；两个 RUN 都要消费，
+# 故 jq 与该文件都留到最后一个 RUN 才清理。
+COPY crates/xtask/src/versions.json /tmp/versions.json
+
+# 与主 Dockerfile 同款模式：set -eu + jq -er 硬门禁（键缺失/JSON 损坏立即失败，
+# 不静默变空串）；裸赋值列表保证从左到右求值，随后单独 export（dash 下同一句
+# export 内自引用不保证看到左侧新值）。
 RUN --mount=type=cache,target=/dl-cache,sharing=locked \
-    export DL_PROXY="${DL_PROXY}" EXPECTED_GOST_SHA256="${GOST_TARBALL_SHA256}" GOST_VERSION="${GOST_VERSION_PIN}" \
+    set -eu \
+    && WARP_DEB_URL="$(jq -er '.warp.url // error("versions.json: .warp.url missing")' /tmp/versions.json)" \
+    && WARP_DEB_SHA256="$(jq -er '.warp.sha256 // error("versions.json: .warp.sha256 missing")' /tmp/versions.json)" \
+    && export DL_PROXY WARP_DEB_URL WARP_DEB_SHA256 \
     && bash /usr/local/bin/fetch-deps.sh "${WARP_DEB_URL}" "${WARP_DEB_SHA256}" 60000000 "/dl-cache/${WARP_DEB_URL##*/}" \
     && cp "/dl-cache/${WARP_DEB_URL##*/}" /tmp/cloudflare-warp.deb \
     && bash /usr/local/bin/install-warp.sh /tmp/cloudflare-warp.deb
 
 RUN --mount=type=cache,target=/dl-cache,sharing=locked \
-    export DL_PROXY="${DL_PROXY}" EXPECTED_GOST_SHA256="${GOST_TARBALL_SHA256}" GOST_VERSION="${GOST_VERSION_PIN}" \
-    && bash /usr/local/bin/fetch-deps.sh "${GOST_TARBALL_URL}" "${GOST_TARBALL_SHA256}" 9000000 "/dl-cache/${GOST_TARBALL_URL##*/}" \
+    set -eu \
+    && GOST_TARBALL_URL="$(jq -er '.gost.url // error("versions.json: .gost.url missing")' /tmp/versions.json)" \
+    && EXPECTED_GOST_SHA256="$(jq -er '.gost.sha256 // error("versions.json: .gost.sha256 missing")' /tmp/versions.json)" \
+    && GOST_VERSION="$(jq -er '.gost.version // error("versions.json: .gost.version missing")' /tmp/versions.json)" \
+    && export DL_PROXY EXPECTED_GOST_SHA256 GOST_VERSION \
+    && bash /usr/local/bin/fetch-deps.sh "${GOST_TARBALL_URL}" "${EXPECTED_GOST_SHA256}" 9000000 "/dl-cache/${GOST_TARBALL_URL##*/}" \
     && bash /usr/local/bin/install-gost.sh amd64 "/dl-cache/${GOST_TARBALL_URL##*/}" \
     && useradd -m -s /bin/bash warp \
     && mkdir -p /var/lib/warpdeck /run/warpdeck \
-    && chown warp:warp /var/lib/warpdeck /run/warpdeck
+    && chown warp:warp /var/lib/warpdeck /run/warpdeck \
+    && rm -f /tmp/versions.json \
+    && apt-get purge -y jq
 
 USER warp
 

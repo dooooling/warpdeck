@@ -956,7 +956,7 @@ ca-certificates
 
 普通 Rust binary 通过 bind mount 或复制到运行容器测试。
 
-### 构建约束（实测 2026-08；2026-08-21 修订为构建期内下载）
+### 构建约束（实测 2026-08；2026-08-21 修订为构建期内下载，2026-08-22 收敛单源消费）
 
 中国网络下 `pkg.cloudflareclient.com` / GitHub release 直连被重置或极慢。
 原「宿主预下载 + build-context 注入」已改为**镜像构建期内下载**，落地做法：
@@ -966,9 +966,10 @@ ca-certificates
    持久 + SHA256 硬校验（不匹配绝不安装）
 2. 代理经 --build-arg DL_PROXY=socks5h://host.docker.internal:10808 注入
    （需代理端允许 LAN）；CI/海外直连留空
-3. URL/SHA256/版本单一来源 = crates/xtask/src/versions.json，
-   `cargo xtask release | dev-base` 经 --build-arg 注入；
-   install-gost.sh 另收 EXPECTED_GOST_SHA256 复核同源取值
+3. URL/SHA256/版本单一来源 = crates/xtask/src/versions.json：
+   Dockerfile 直接从 build context COPY 后用 jq 解析（不经 --build-arg，
+   Dockerfile 内零默认值副本）；install-gost.sh 另收 EXPECTED_GOST_SHA256
+   复核同源取值
 4. /var/lib/apt/lists 不能用 BuildKit cache mount：
    缓存被清后 RUN 层 CACHED 跳过 apt-get update -> 索引为空 ->
    所有依赖报 "not installable"。只缓存 /var/cache/apt。
