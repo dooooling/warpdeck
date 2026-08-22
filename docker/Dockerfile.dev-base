@@ -32,20 +32,23 @@ COPY docker/install-warp.sh docker/install-gost.sh docker/fetch-deps.sh /usr/loc
 # 故 jq 与该文件都留到最后一个 RUN 才清理。
 COPY crates/xtask/src/versions.json /tmp/versions.json
 
-# 与主 Dockerfile 同款模式：裸赋值列表（dash/bash 均保证从左到右求值）+
-# 单独 export，避免同一句 export 内自引用在 dash 下取到空值。
+# 与主 Dockerfile 同款模式：set -eu + jq -er 硬门禁（键缺失/JSON 损坏立即失败，
+# 不静默变空串）；裸赋值列表保证从左到右求值，随后单独 export（dash 下同一句
+# export 内自引用不保证看到左侧新值）。
 RUN --mount=type=cache,target=/dl-cache,sharing=locked \
-    WARP_DEB_URL="$(jq -r .warp.url /tmp/versions.json)" \
-    WARP_DEB_SHA256="$(jq -r .warp.sha256 /tmp/versions.json)" \
+    set -eu \
+    && WARP_DEB_URL="$(jq -er '.warp.url // error("versions.json: .warp.url missing")' /tmp/versions.json)" \
+    && WARP_DEB_SHA256="$(jq -er '.warp.sha256 // error("versions.json: .warp.sha256 missing")' /tmp/versions.json)" \
     && export DL_PROXY WARP_DEB_URL WARP_DEB_SHA256 \
     && bash /usr/local/bin/fetch-deps.sh "${WARP_DEB_URL}" "${WARP_DEB_SHA256}" 60000000 "/dl-cache/${WARP_DEB_URL##*/}" \
     && cp "/dl-cache/${WARP_DEB_URL##*/}" /tmp/cloudflare-warp.deb \
     && bash /usr/local/bin/install-warp.sh /tmp/cloudflare-warp.deb
 
 RUN --mount=type=cache,target=/dl-cache,sharing=locked \
-    GOST_TARBALL_URL="$(jq -r .gost.url /tmp/versions.json)" \
-    EXPECTED_GOST_SHA256="$(jq -r .gost.sha256 /tmp/versions.json)" \
-    GOST_VERSION="$(jq -r .gost.version /tmp/versions.json)" \
+    set -eu \
+    && GOST_TARBALL_URL="$(jq -er '.gost.url // error("versions.json: .gost.url missing")' /tmp/versions.json)" \
+    && EXPECTED_GOST_SHA256="$(jq -er '.gost.sha256 // error("versions.json: .gost.sha256 missing")' /tmp/versions.json)" \
+    && GOST_VERSION="$(jq -er '.gost.version // error("versions.json: .gost.version missing")' /tmp/versions.json)" \
     && export DL_PROXY EXPECTED_GOST_SHA256 GOST_VERSION \
     && bash /usr/local/bin/fetch-deps.sh "${GOST_TARBALL_URL}" "${EXPECTED_GOST_SHA256}" 9000000 "/dl-cache/${GOST_TARBALL_URL##*/}" \
     && bash /usr/local/bin/install-gost.sh amd64 "/dl-cache/${GOST_TARBALL_URL##*/}" \

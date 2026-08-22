@@ -11,7 +11,9 @@
 # 解析，Dockerfile 不再保存任何默认值副本（手动 `docker build` 同样零参数生效）。
 
 # ---------- frontend builder ----------
-FROM node:22-slim AS web-builder
+# node 大版本与 CI（setup-node 24）及 web/package.json engines（>=24）保持一致；
+# pnpm 版本与 packageManager 字段 / ci.yml 三处一致。
+FROM node:24-slim AS web-builder
 
 RUN npm config set registry https://registry.npmmirror.com \
     && npm install -g pnpm@11.22.0
@@ -79,15 +81,20 @@ COPY crates/xtask/src/versions.json /tmp/versions.json
 # 下载在 cache mount，安装后临时副本即弃。
 # install-warp.sh 对 deb 做"剪 GUI 依赖的重打包"(webkit/LLVM/mesa 等 ~360MB),
 # apt lists 必须留到 WARP/GOST 安装之后才清理(install-warp.sh 依赖包索引)。
+#
+# 提取健壮性（2026-08-22 审查补强）：RUN 脚本默认无 set -e，jq 失败（键缺失输出
+# null、JSON 损坏退出非零）会静默变空串直到 fetch 阶段才费解报错——故 set -eu +
+# jq -er '.x // error(...)' 硬门禁。dash 下同一句 export 内自引用不保证看到左侧
+# 新值，因此用「裸赋值列表（保证从左到右）+ 单独 export」；注释不放进续行内，
+# 避免依赖前端对续行内整行注释的剥离行为。
 RUN --mount=type=cache,target=/dl-cache,sharing=locked \
-    # 注意：值间有引用（EXPECTED 复用 GOST 哈希），必须用「裸赋值列表 + 随后单独
-    # export」——构建 shell 是 dash，同一句 export 内的自引用不保证看到左侧新值。
-    WARP_DEB_URL="$(jq -r .warp.url /tmp/versions.json)" \
-    WARP_DEB_SHA256="$(jq -r .warp.sha256 /tmp/versions.json)" \
-    GOST_TARBALL_URL="$(jq -r .gost.url /tmp/versions.json)" \
-    GOST_TARBALL_SHA256="$(jq -r .gost.sha256 /tmp/versions.json)" \
-    GOST_VERSION="$(jq -r .gost.version /tmp/versions.json)" \
-    EXPECTED_GOST_SHA256="${GOST_TARBALL_SHA256}" \
+    set -eu \
+    && WARP_DEB_URL="$(jq -er '.warp.url // error("versions.json: .warp.url missing")' /tmp/versions.json)" \
+    && WARP_DEB_SHA256="$(jq -er '.warp.sha256 // error("versions.json: .warp.sha256 missing")' /tmp/versions.json)" \
+    && GOST_TARBALL_URL="$(jq -er '.gost.url // error("versions.json: .gost.url missing")' /tmp/versions.json)" \
+    && GOST_TARBALL_SHA256="$(jq -er '.gost.sha256 // error("versions.json: .gost.sha256 missing")' /tmp/versions.json)" \
+    && GOST_VERSION="$(jq -er '.gost.version // error("versions.json: .gost.version missing")' /tmp/versions.json)" \
+    && EXPECTED_GOST_SHA256="${GOST_TARBALL_SHA256}" \
     && export DL_PROXY WARP_DEB_URL WARP_DEB_SHA256 GOST_TARBALL_URL GOST_TARBALL_SHA256 GOST_VERSION EXPECTED_GOST_SHA256 \
     && bash /usr/local/bin/fetch-deps.sh "${WARP_DEB_URL}" "${WARP_DEB_SHA256}" 60000000 "/dl-cache/${WARP_DEB_URL##*/}" \
     && bash /usr/local/bin/fetch-deps.sh "${GOST_TARBALL_URL}" "${GOST_TARBALL_SHA256}" 9000000 "/dl-cache/${GOST_TARBALL_URL##*/}" \
