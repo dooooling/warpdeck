@@ -37,7 +37,8 @@ cargo test --workspace
 
 # Build entry points (replaced scripts/*.ps1 orchestration layer; 2026-08-21)
 # GOST/WARP deps download in-image via docker/fetch-deps.sh (cache mount + forced sha256),
-# single source = crates/xtask/src/versions.json; CN network adds --proxy socks5h://host.docker.internal:10808
+# single source = crates/xtask/src/versions.json (Dockerfiles COPY it from the build
+# context and parse with jq — no --build-arg copies); CN network adds --proxy socks5h://host.docker.internal:10808
 cargo xtask release                 # release image (default tag warpdeck:local)
 cargo xtask dev-base                # runtime dev image warpdeck-dev-base:1 (rare)
 cargo xtask in-container            # compile Linux ELF -> target/linux-artifacts/

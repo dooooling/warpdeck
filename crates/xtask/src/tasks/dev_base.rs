@@ -2,8 +2,9 @@
 //!
 //! 只在 docker/*.sh / OS 包 / WARP+GOST 安装逻辑变化时重建；后端普通代码变化
 //! 走 `in-container`（bind mount 二进制），不经过本任务（AGENTS.md 纪律）。
-//! 依赖在构建期内经 fetch-deps.sh 下载（URL/SHA256 由 versions.json 注入，
-//! cache mount 持久；`--proxy` 透传给中国网络环境）。
+//! 依赖在构建期内经 fetch-deps.sh 下载（URL/SHA256 唯一来源 = versions.json，
+//! Dockerfile 从 build context 直接 COPY + jq 解析；cache mount 持久；
+//! `--proxy` 透传给中国网络环境）。
 
 use anyhow::Result;
 
@@ -17,8 +18,11 @@ pub struct DevBaseArgs {
 pub fn run(args: &DevBaseArgs) -> Result<()> {
     let v = Versions::load()?;
     println!(
-        "deps pin: gost v{} / warp v{} (downloaded & verified in-image)",
-        v.gost.version, v.warp.version
+        "deps pin (consumed in-image from versions.json): gost v{} (sha256 {}) / warp v{} (sha256 {})",
+        v.gost.version,
+        &v.gost.sha256[..12],
+        v.warp.version,
+        &v.warp.sha256[..12]
     );
     let repo = common::repo_root()?;
     common::run(
@@ -26,16 +30,6 @@ pub fn run(args: &DevBaseArgs) -> Result<()> {
         &[
             "build".into(),
             "--progress=plain".into(),
-            "--build-arg".into(),
-            format!("GOST_TARBALL_SHA256={}", v.gost.sha256),
-            "--build-arg".into(),
-            format!("WARP_DEB_SHA256={}", v.warp.sha256),
-            "--build-arg".into(),
-            format!("GOST_TARBALL_URL={}", v.gost.url),
-            "--build-arg".into(),
-            format!("WARP_DEB_URL={}", v.warp.url),
-            "--build-arg".into(),
-            format!("GOST_VERSION_PIN={}", v.gost.version),
             "--build-arg".into(),
             format!("DL_PROXY={}", args.proxy.clone().unwrap_or_default()),
             "-t".into(),

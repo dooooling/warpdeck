@@ -2538,7 +2538,9 @@ docker/fetch-deps.sh（容器内执行）
 代理经 --build-arg DL_PROXY=socks5h://host.docker.internal:10808 走宿主代理
   （需代理端允许 LAN；CI/海外网络直连留空）
 URL/SHA256/版本单一来源 = crates/xtask/src/versions.json
-  - `cargo xtask release` / `dev-base` 经 --build-arg 注入 Dockerfile
+  - 2026-08-22 起：两个 Dockerfile 直接从 build context COPY 该文件，
+    RUN 内用 jq 解析（不经 --build-arg，Dockerfile 内零默认值副本；
+    jq 仅构建期使用，安装后即 purge）
   - install-gost.sh 另收 EXPECTED_GOST_SHA256 复核同源取值
 ```
 
