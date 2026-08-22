@@ -130,13 +130,12 @@ pub async fn sync_mdm_xml(
 /// 无权限语义，退化为普通写——mdm.xml 仅在 Linux 容器内被 warp-svc 消费。
 #[cfg(unix)]
 async fn write_private(path: &Path, content: &str) -> std::io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600)
+        .mode(0o600) // tokio OpenOptions 内建（cfg unix），无需导入扩展 trait
         .open(path)
         .await?;
     file.write_all(content.as_bytes()).await?;
