@@ -739,6 +739,52 @@ async fn proxy_put_zero_limits_is_422() {
     app.close().await;
 }
 
+/// P1 审查 R1#7：显式 null = 清除限额；缺省 = 保持。单层 Option 时代
+/// 「设了就清不掉」的回归探针。
+#[tokio::test]
+async fn proxy_put_null_clears_limit_and_omission_keeps_it() {
+    let app = TestApp::new().await;
+    // 先设置限额。
+    let resp = app
+        .request_json(
+            Method::PUT,
+            "/api/v1/proxy",
+            json!({ "max_connections": 64 }),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(app.request(Method::GET, "/api/v1/proxy").await).await;
+    assert_eq!(body["max_connections"], 64);
+
+    // 缺省（不提供字段）→ 保持。
+    let resp = app
+        .request_json(
+            Method::PUT,
+            "/api/v1/proxy",
+            json!({ "http_enabled": true }),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(app.request(Method::GET, "/api/v1/proxy").await).await;
+    assert_eq!(body["max_connections"], 64, "缺省必须保持原值");
+
+    // 显式 null → 清除。
+    let resp = app
+        .request_json(
+            Method::PUT,
+            "/api/v1/proxy",
+            json!({ "max_connections": null }),
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(app.request(Method::GET, "/api/v1/proxy").await).await;
+    assert!(
+        body["max_connections"].is_null(),
+        "显式 null 必须清除限额（P1 审查 R1#7）"
+    );
+    app.close().await;
+}
+
 // ---------- Account skeleton (P7-011) ----------
 
 #[tokio::test]

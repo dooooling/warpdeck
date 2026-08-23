@@ -98,8 +98,22 @@ pub async fn create(
         .map_err(|e| e.into_response_with(&request_id))?;
 
     // 凭据落库（校验已通过；失败上浮并删除档案保持一致性）。
+    // P1 审查 R1#10：补偿删除自身失败时**不得吞错**——孤儿档案（无凭据）会让
+    // 管理员误以为创建成功；显式 500 指明残留 id，便于人工清理。
     if let Err(e) = write_credentials(&state, profile.id, &req).await {
-        let _ = state.profiles.delete(profile.id).await;
+        if let Err(del_err) = state.profiles.delete(profile.id).await {
+            tracing::error!(
+                component = "api",
+                profile_id = profile.id,
+                error = %del_err,
+                "credential write failed AND compensating profile delete failed; orphan profile left behind"
+            );
+            return Err(ApiError::Internal(format!(
+                "credentials failed ({e}) and cleanup also failed; orphan profile {} remains and must be deleted manually",
+                profile.id
+            ))
+            .into_response_with(&request_id));
+        }
         return Err(secret_error(e).into_response_with(&request_id));
     }
 
@@ -217,8 +231,17 @@ pub async fn update(
         .map_err(|e| e.into_response_with(&request_id))?;
     // secret 变更不经过 profiles.update 的 mark 逻辑，这里补上；
     // mode/org 变更已被 update 标记（幂等，重复置 1 无副作用）。
+    // P1 审查 R1#10：标记失败**不得静默**——否则凭据轮换对运行中实例不生效
+    // 且无人知晓（安全相关的陈旧凭据）。记 error 级日志；数据本身已一致。
     if runtime_relevant {
-        let _ = state.instances.mark_restart_pending_by_profile(id).await;
+        if let Err(e) = state.instances.mark_restart_pending_by_profile(id).await {
+            tracing::error!(
+                component = "api",
+                profile_id = id,
+                error = %e,
+                "credentials updated but marking bound instances restart_pending failed; instances keep OLD credentials until manual restart"
+            );
+        }
         state.notify_change();
     }
 

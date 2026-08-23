@@ -315,22 +315,10 @@ impl InstanceManager {
             cancel_rx,
         );
 
-        // P4 Gate "Healthy ≠ PID alive"：注册/连接成功只代表控制面就绪，
-        // Healthy 必须经真实数据面探测（warp=on）验证（AGENTS.md）。
+        // P4 Gate "Healthy ≠ PID alive"（P1 审查 R1#12 修订）：on_started 只记录
+        // PID 并保持 Starting；Healthy 在数据面验证通过后才显式置位——瞬态假
+        // Healthy 会经 API/SSE 直出，违背 AGENTS.md 基线。
         self.registry.on_started(ctx.id, warp_pid, dbus_pid);
-        self.publish_transition(
-            ctx.id,
-            RuntimeState::Starting,
-            RuntimeState::Healthy,
-            "start",
-        );
-        self.bus
-            .publish(HealthEvent::HealthChanged(StateTransition {
-                instance_id: ctx.id,
-                from: RuntimeState::Starting,
-                to: RuntimeState::Healthy,
-                reason: "start".to_string(),
-            }));
         match self.verify_data_plane(ctx).await {
             Ok(report) => {
                 // P0 审查 #1：ZeroTrust 的 mdm.xml 含明文 client_secret，
@@ -343,6 +331,14 @@ impl InstanceManager {
                     record_probe_metrics(e, &report);
                     e.last_error = None;
                 });
+                // 数据面验证通过：Starting → Healthy（唯一入口）。
+                self.registry.set_state(ctx.id, RuntimeState::Healthy);
+                self.publish_transition(
+                    ctx.id,
+                    RuntimeState::Starting,
+                    RuntimeState::Healthy,
+                    "data plane verified",
+                );
                 tracing::info!(
                     component = "manager",
                     instance_id = %ctx.id,
@@ -357,13 +353,13 @@ impl InstanceManager {
                 // 进程/控制面均正常，只是数据面建连窗口未结束：降级而非启动失败
                 // （无 orphan、不误报失败）；健康循环的下一轮探测会拉回 Healthy。
                 // 竞态保护：verify 期间若 warp-svc 已崩溃（watcher 已置 Failed），
-                // 不降级覆盖 Failed（health.rs 的 current==Healthy 例外同理）。
-                let still_healthy = self
+                // 不降级覆盖 Failed。
+                let still_starting = self
                     .registry
                     .get(ctx.id)
-                    .map(|r| r.state == RuntimeState::Healthy)
+                    .map(|r| r.state == RuntimeState::Starting)
                     .unwrap_or(false);
-                if still_healthy {
+                if still_starting {
                     self.registry.update(ctx.id, |e| {
                         e.state = RuntimeState::Degraded;
                         e.consecutive_failures = 1;
@@ -372,17 +368,10 @@ impl InstanceManager {
                     let reason = msg.clone();
                     self.publish_transition(
                         ctx.id,
-                        RuntimeState::Healthy,
+                        RuntimeState::Starting,
                         RuntimeState::Degraded,
                         reason.clone(),
                     );
-                    self.bus
-                        .publish(HealthEvent::HealthChanged(StateTransition {
-                            instance_id: ctx.id,
-                            from: RuntimeState::Healthy,
-                            to: RuntimeState::Degraded,
-                            reason,
-                        }));
                 }
                 tracing::warn!(
                     component = "manager",

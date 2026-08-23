@@ -16,6 +16,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # P1 审查 R2#2：业务大改后可手动触发全矩阵，无需等容器路径变更。
+  workflow_dispatch:
 
 # detect job 的 paths-filter 在 PR 模式走 GitHub API（listFiles），需要显式授权；
 # 默认 GITHUB_TOKEN 权限收紧时会报 "Resource not accessible by integration"。
@@ -33,12 +35,14 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       container: ${{ steps.filter.outputs.container }}
+      dataplane: ${{ steps.filter.outputs.dataplane }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
+            # 语义组 1：容器/装配本体——镜像内容物可能变化
             container:
               - 'Dockerfile'
               - 'docker/**'
@@ -46,6 +50,16 @@ jobs:
               - 'compose*.yml'
               - 'crates/xtask/**'
               - '.github/workflows/docker-e2e.yml'
+            # 语义组 2：数据面核心（P1 审查 R1#11/R2#2）——多实例隔离、
+            # 故障恢复、认证、无直连泄漏的回归保护对象。这些路径变更时
+            # 同样必须跑全矩阵，而非只有单实例 smoke。
+            dataplane:
+              - 'crates/warpdeck-server/src/runtime/**'
+              - 'crates/warpdeck-server/src/proxy/**'
+              - 'crates/warpdeck-server/src/reconciler/**'
+              - 'crates/warpdeck-server/migrations/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
 
   smoke:
     name: Docker Smoke (E2E-01)
@@ -67,7 +81,7 @@ jobs:
   full:
     name: Docker E2E (L5 full matrix)
     needs: detect
-    if: needs.detect.outputs.container == 'true'
+    if: needs.detect.outputs.container == 'true' || needs.detect.outputs.dataplane == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

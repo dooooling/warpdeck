@@ -2769,7 +2769,8 @@ P11-003 最小权限审计结论：仅 warp-svc 建 /dev/net/tun 需要 root（c
   apt lists 在 WARP/GOST 安装完成后才清理（install-warp.sh 依赖 apt 索引，见 §23.3.1）
 P11-004 release compose：image ${WARPDECK_IMAGE:-warpdeck:local} 可注入；端口变量
   ${WEB_HOST_PORT:-9000}/${SOCKS5_HOST_PORT:-11080}/${HTTP_HOST_PORT:-18080}；
-  volumes 只持久化 warpdeck-data/warpdeck-run
+  volumes 只持久化 warpdeck-data（2026-08-23 修订：/run/warpdeck 由 named volume 改为
+  tmpfs 0700/64m——运行时目录不得跨容器重建残留 socket/PID，P1 审查 R2#6）
 P11-005 healthcheck：curl /api/v1/health（轻量 readiness，不做外网数据面 probe）
 P11-006 E2E harness：cargo xtask e2e（2026-08-21 自 .ps1 移植；原 scripts/e2e/run-e2e.ps1）（单轮复用 warpdeck:e2e 镜像，7 用例）
   - 本机踩坑记录：Docker Compose v5 无 --remove-orphans；up -d 偶发不退出（Start-Process

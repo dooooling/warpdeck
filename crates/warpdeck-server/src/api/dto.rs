@@ -289,6 +289,10 @@ impl ProxyActualView {
 /// P8 扩展（DESIGN §20.6）：
 /// - `username`: 用户名（None = 保持，Some 非空 = 设置）；
 /// - `password`: 密码（None = 保持，Some("") = 清除，Some 非空 = 设置/轮换）。
+///
+/// P1 审查 R1#7：`max_connections`/`max_rps` 为双层 Option——
+/// 缺省 = 保持原值；显式 `null` = 清除限额（不限制）；数值 = 设置。
+/// （单层 Option 无法区分「未提供」与「null」，导致限额设了就清不掉。）
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UpdateProxyRequest {
     pub socks5_enabled: Option<bool>,
@@ -297,12 +301,23 @@ pub struct UpdateProxyRequest {
     pub username: Option<String>,
     pub password: Option<String>,
     pub allowed_ips: Option<Vec<String>>,
-    pub max_connections: Option<u32>,
-    pub max_rps: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub max_connections: Option<Option<u32>>,
+    #[serde(default, deserialize_with = "deserialize_double_option")]
+    pub max_rps: Option<Option<u32>>,
+}
+
+/// 双层 Option 反序列化：字段缺失 → None；JSON null → Some(None)；值 → Some(Some(v))。
+fn deserialize_double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(de)?))
 }
 
 impl UpdateProxyRequest {
-    /// 应用到当前配置（None = 保持原值）。
+    /// 应用到当前配置（外层 None = 保持原值；Some(None) = 清除；Some(Some(v)) = 设置）。
     pub fn apply(&self, current: &ProxyConfig) -> ProxyConfig {
         ProxyConfig {
             socks5_enabled: self.socks5_enabled.unwrap_or(current.socks5_enabled),
@@ -318,20 +333,22 @@ impl UpdateProxyRequest {
                 .allowed_ips
                 .clone()
                 .unwrap_or_else(|| current.allowed_ips.clone()),
-            max_connections: self.max_connections.or(current.max_connections),
-            max_rps: self.max_rps.or(current.max_rps),
+            max_connections: self.max_connections.unwrap_or(current.max_connections),
+            max_rps: self.max_rps.unwrap_or(current.max_rps),
         }
     }
 
-    /// 校验：max_connections/max_rps 必须 ≥1（0/None = 不限制的表达由存储层处理）。
+    /// 校验：数值必须 ≥1；显式 null（清除）合法。
     pub fn validate(&self) -> Result<(), String> {
         for (field, v) in [
-            ("max_connections", self.max_connections),
-            ("max_rps", self.max_rps),
+            ("max_connections", &self.max_connections),
+            ("max_rps", &self.max_rps),
         ] {
-            if let Some(v) = v {
-                if v == 0 {
-                    return Err(format!("{field} must be >= 1 (omit to leave unchanged)"));
+            if let Some(inner) = v {
+                if inner == &Some(0) {
+                    return Err(format!(
+                        "{field} must be >= 1 (send null to remove the limit)"
+                    ));
                 }
             }
         }

@@ -303,9 +303,74 @@ fn trace_with_auth(timeout_secs: u64) -> Option<String> {
     get_trace("socks5", timeout_secs)
 }
 
+/// P1 审查 R2#3：用例独立化 fixture——保证「≥1 个健康实例 + 代理监听就绪」。
+/// 幂等：full 轮里状态已存在时零开销直通；fresh 单用例选择下自行补齐。
+/// 新建实例记入 `ids`（后续 stop-all/重启恢复等断言复用）。
+fn ensure_healthy_instance(e2e: &mut E2e, ids: &mut Vec<i64>) -> Result<()> {
+    let have_healthy = if ids.is_empty() {
+        let list = e2e.api("GET", "/instances", None)?;
+        list.json.as_array().is_some_and(|a| {
+            a.iter()
+                .any(|it| it.get("runtime_state").and_then(|v| v.as_str()) == Some("healthy"))
+        })
+    } else {
+        true
+    };
+    if !have_healthy {
+        let id = e2e.create_instance("e2e-fixture", None)?;
+        ids.push(id);
+        e2e.wait_instance_state(id, "healthy", 360)?;
+    }
+    wait_proxy_listeners(90)
+}
+
+/// 用例独立化：确保代理认证已配置（E2E-04 之外的用例单独运行时，
+/// trace_with_auth 才有凭据可用）。已配置时零开销直通。
+fn ensure_authenticated_proxy(e2e: &mut E2e) -> Result<()> {
+    let view = e2e.api("GET", "/proxy", None)?;
+    if view.json.get("auth_configured").and_then(|v| v.as_bool()) != Some(true) {
+        e2e.api(
+            "PUT",
+            "/proxy",
+            Some(&json!({
+                "auth_enabled": true,
+                "username": "e2e-proxy-user",
+                "password": "e2e-proxy-pass-123"
+            })),
+        )?;
+    }
+    Ok(())
+}
+
 pub fn run(args: &Args) -> Result<()> {
+    // P1 审查 R2#3：--only 严格解析——非法编号/空选择立即报错，
+    // 杜绝「filter_map 静默丢值 → 零用例运行仍输出 ALL PASSED」的假绿灯。
     let only: Vec<u32> = match &args.only {
-        Some(s) => s.split(',').filter_map(|p| p.trim().parse().ok()).collect(),
+        Some(s) => {
+            let mut out: Vec<u32> = Vec::new();
+            for p in s.split(',') {
+                let t = p.trim();
+                if t.is_empty() {
+                    continue;
+                }
+                let n: u32 = t
+                    .parse()
+                    .with_context(|| format!("invalid --only item: '{t}'"))?;
+                ensure!(
+                    (1..=8).contains(&n),
+                    "--only {n} out of range (valid cases: 1..=8)"
+                );
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+            ensure!(
+                !out.is_empty(),
+                "--only selected no case (valid cases: 1..=8)"
+            );
+            out.sort_unstable();
+            out
+        }
         None => vec![1, 2, 3, 4, 5, 6, 7, 8],
     };
     let has = |n: u32| only.contains(&n);
@@ -350,12 +415,14 @@ pub fn run(args: &Args) -> Result<()> {
     // ---------- E2E-02 / 03 ----------
     if has(2) {
         println!("== E2E-02 socks5 -> warp=on ==");
-        wait_proxy_listeners(90)?;
+        // 用例独立化（P1 审查 R2#3）：fresh 选择下自行补齐「健康实例 + 代理监听」。
+        ensure_healthy_instance(&mut e2e, &mut ids)?;
         assert_warp_on("socks5")?;
         results.push("PASS E2E-02 socks5 warp=on".into());
     }
     if has(3) {
         println!("== E2E-03 http -> warp=on ==");
+        ensure_healthy_instance(&mut e2e, &mut ids)?;
         assert_warp_on("http")?;
         results.push("PASS E2E-03 http warp=on".into());
     }
@@ -422,6 +489,8 @@ pub fn run(args: &Args) -> Result<()> {
     // ---------- E2E-05 ----------
     if has(5) {
         println!("== E2E-05 kill one warp-svc -> pool shrinks -> proxy alive -> auto-restart ==");
+        ensure_healthy_instance(&mut e2e, &mut ids)?;
+        ensure_authenticated_proxy(&mut e2e)?;
         let container = format!("{PROJECT}-warpdeck-1");
         common::run(
             "docker",
@@ -456,6 +525,8 @@ pub fn run(args: &Args) -> Result<()> {
     // ---------- E2E-06 ----------
     if has(6) {
         println!("== E2E-06 kill gost -> reconciler restart -> trace recovers ==");
+        ensure_healthy_instance(&mut e2e, &mut ids)?;
+        ensure_authenticated_proxy(&mut e2e)?;
         let container = format!("{PROJECT}-warpdeck-1");
         common::run(
             "docker",
@@ -488,19 +559,27 @@ pub fn run(args: &Args) -> Result<()> {
     // ---------- E2E-07 ----------
     if has(7) {
         println!("== E2E-07 stop all instances -> proxy must fail (no direct leak) ==");
-        if ids.is_empty() {
-            let list = e2e.api("GET", "/instances", None)?;
-            if let Value::Array(items) = &list.json {
-                for it in items {
-                    if let Some(id) = it.get("id").and_then(|v| v.as_i64()) {
-                        e2e.stop_instance(id);
-                    }
-                }
+        // 独立化（P1 审查 R2#3）：至少要有一个**运行中**实例，「停光后无泄漏」
+        // 断言才有意义（零实例时 trace 失败是空洞通过）。fixture 先补齐，
+        // 然后停止 **列表中全部** 实例（含 no_fresh 复用时未跟踪的遗留实例）。
+        ensure_healthy_instance(&mut e2e, &mut ids)?;
+        let list = e2e.api("GET", "/instances", None)?;
+        let mut all_ids: Vec<i64> = list
+            .json
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|it| it.get("id").and_then(|v| v.as_i64()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in &ids {
+            if !all_ids.contains(id) {
+                all_ids.push(*id);
             }
-        } else {
-            for id in &ids {
-                e2e.stop_instance(*id);
-            }
+        }
+        for id in &all_ids {
+            e2e.stop_instance(*id);
         }
         std::thread::sleep(Duration::from_secs(12));
         let leaked = trace_with_auth(20);
