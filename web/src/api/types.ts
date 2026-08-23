@@ -29,6 +29,8 @@ export interface InstanceView {
   colo: string | null
   latency_ms: number | null
   last_error: string | null
+  /** 实际重启次数（RuntimeRegistry；未运行 = 0，P1 审查 R4）。 */
+  restarts: number
   /** v0.2 §17.4：绑定的账号档案摘要（NULL 绑定按默认 free 档展开）。 */
   account: AccountRefView | null
 }
