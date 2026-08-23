@@ -484,6 +484,11 @@ impl TestApp {
         self.gost.clone()
     }
 
+    /// 直查测试 DB（期望侧字段断言用，如 restart 命令代数）。
+    pub fn pool_for_test(&self) -> SqlitePool {
+        self.pool.clone()
+    }
+
     /// 导出 state 供测试自建请求（需要自定义 body 的用例）。
     pub fn state_for_test(&self) -> ApiState {
         self.state.clone()

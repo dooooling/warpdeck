@@ -198,6 +198,23 @@ impl WarpInstanceRepository for FlakyRepo {
         self.fail()?;
         self.inner.create_guarded(name, account_profile_id).await
     }
+
+    async fn request_restart(
+        &self,
+        id: crate::runtime::instance::InstanceId,
+    ) -> Result<i64, RepoError> {
+        self.fail()?;
+        self.inner.request_restart(id).await
+    }
+
+    async fn acknowledge_restart(
+        &self,
+        id: crate::runtime::instance::InstanceId,
+        generation: i64,
+    ) -> Result<(), RepoError> {
+        self.fail()?;
+        self.inner.acknowledge_restart(id, generation).await
+    }
 }
 
 /// 测试环境装配：真实 repo + Fake runtime + 共享 registry + ManualClock。
@@ -666,6 +683,63 @@ async fn proxy_password_read_failure_keeps_last_applied_authenticated_config() {
         1,
         "fail-closed: 解密失败后不得再推送任何配置（含匿名降级）"
     );
+}
+
+/// P1 审查 R2#1：显式重启命令由 Reconciler 执行一次并追平代数；下轮幂等。
+#[tokio::test]
+async fn explicit_restart_command_executes_once_and_acknowledges() {
+    let env = TestEnv::new().await;
+    let spec = env.repo.create("inst-cmd", None).await.unwrap();
+    env.set_registry_state(spec.id, RuntimeState::Healthy);
+
+    let gen = env.repo.request_restart(spec.id).await.unwrap();
+    assert_eq!(gen, 1);
+
+    env.reconciler.reconcile_once().await;
+
+    assert_eq!(
+        env.runtime.restarted_ids(),
+        vec![spec.id.as_i64()],
+        "命令代数差必须触发一次 runtime.restart"
+    );
+    let after = env.repo.get(spec.id).await.unwrap().unwrap();
+    assert_eq!(after.observed_restart_generation, 1, "完成后追平代数");
+
+    // 下轮：代数已平，不再重复重启。
+    env.reconciler.reconcile_once().await;
+    assert_eq!(env.runtime.restarted_ids().len(), 1);
+}
+
+/// P1 审查 R2#1：停机期间排队的多条重启命令合并——后续的全新启动直接
+/// 追平到最新代数，不产生多余的 restart。
+#[tokio::test]
+async fn queued_restart_commands_coalesce_into_next_start() {
+    let env = TestEnv::new().await;
+    let spec = env.repo.create("inst-queue", None).await.unwrap();
+    // 期望停止（实例不在运行）。
+    env.repo
+        .set_desired(spec.id, true, DesiredState::Stopped)
+        .await
+        .unwrap();
+
+    // 停机期间排队两条命令。
+    env.repo.request_restart(spec.id).await.unwrap();
+    env.repo.request_restart(spec.id).await.unwrap();
+
+    // 恢复期望运行 → start 路径直接追平到最新代数。
+    env.repo
+        .set_desired(spec.id, true, DesiredState::Running)
+        .await
+        .unwrap();
+    env.reconciler.reconcile_once().await;
+
+    assert_eq!(env.runtime.started_ids(), vec![spec.id.as_i64()]);
+    assert!(
+        env.runtime.restarted_ids().is_empty(),
+        "启动已满足排队的重启命令，不得再 restart"
+    );
+    let after = env.repo.get(spec.id).await.unwrap().unwrap();
+    assert_eq!(after.observed_restart_generation, 2, "追平到最新代数");
 }
 
 /// P1 审查 #3/#4：两个 listener 全关 → 显式 stop GOST（而非 apply 全关配置

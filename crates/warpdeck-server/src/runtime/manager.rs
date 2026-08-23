@@ -160,6 +160,9 @@ pub struct InstanceManager {
     /// 运行中实例表。持有期间禁止其他生命周期操作交错：
     /// 同一把锁 = 同实例串行（P3-002）+ 全局串行启动（P3-009）。
     runs: tokio::sync::Mutex<HashMap<InstanceId, RunningInstance>>,
+    /// 每实例当前启动代数（P1 审查 R2#1 run_id 守卫）：do_start 递增；
+    /// stop 成功后移除。crash watcher 比对代数，忽略迟到事件。
+    current_run: std::sync::Arc<std::sync::Mutex<HashMap<InstanceId, u64>>>,
 }
 
 impl InstanceManager {
@@ -200,6 +203,7 @@ impl InstanceManager {
             data_dir,
             runtime_base,
             runs: tokio::sync::Mutex::new(HashMap::new()),
+            current_run: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -209,6 +213,14 @@ impl InstanceManager {
         ctx: &InstanceContext,
         account_profile_id: Option<i64>,
     ) -> Result<RunningInstance, ManagerError> {
+        // P1 审查 R2#1：登记本次启动代数（crash watcher 携带同一数值，
+        // 事件到达时比对，实例已重启/移除则整体忽略迟到事件）。
+        let my_generation = {
+            let mut cur = self.current_run.lock().expect("current_run lock poisoned");
+            let g = cur.entry(ctx.id).or_insert(0);
+            *g += 1;
+            *g
+        };
         self.registry.insert(ctx.id);
         // 迁移起点：restart 场景下可能是 Healthy/Degraded/Failed，不是 Stopped。
         let from = self
@@ -313,6 +325,8 @@ impl InstanceManager {
             self.bus.clone(),
             svc,
             cancel_rx,
+            self.current_run.clone(),
+            my_generation,
         );
 
         // P4 Gate "Healthy ≠ PID alive"（P1 审查 R1#12 修订）：on_started 只记录
@@ -666,12 +680,19 @@ fn record_probe_metrics(entry: &mut InstanceRuntime, report: &DataPlaneReport) {
 
 /// crash watcher 任务：独占 svc 进程句柄监视崩溃；结束后归还 svc，崩溃时更新
 /// registry（Failed）。进程句柄被回收前，manager 侧通过 `watcher_task` 关联。
+///
+/// P1 审查 R2#1（run_id 守卫）：`current_run` 记录每个实例的当前启动代数，
+/// watcher 携带自己那次启动的代数——事件到达时代数已前进（实例已被重启）或
+/// 条目已移除（已停止/删除）→ 迟到事件**整体忽略**，防止旧进程的崩溃事件
+/// 覆盖新实例状态。
 fn spawn_crash_watcher(
     registry: Arc<RuntimeRegistry>,
     clock: Arc<dyn Clock>,
     bus: EventBus,
     svc: WarpService,
     cancel: tokio::sync::watch::Receiver<()>,
+    current_run: std::sync::Arc<std::sync::Mutex<HashMap<InstanceId, u64>>>,
+    my_generation: u64,
 ) -> JoinHandle<WatcherOutcome> {
     tokio::spawn(async move {
         let watcher = CrashWatcher::new(clock, CRASH_POLL);
@@ -680,6 +701,21 @@ fn spawn_crash_watcher(
             .into_warp_service()
             .expect("manager crash watcher always wraps WarpService");
         if let Some(event) = &event {
+            let current = current_run
+                .lock()
+                .expect("current_run lock poisoned")
+                .get(&event.instance_id)
+                .copied();
+            if current != Some(my_generation) {
+                tracing::debug!(
+                    component = "manager",
+                    instance_id = %event.instance_id,
+                    my_generation,
+                    current = ?current,
+                    "stale crash event ignored (instance restarted or removed)"
+                );
+                return (Some(event.clone()), svc);
+            }
             let from = registry
                 .get(event.instance_id)
                 .map(|r| r.state)
@@ -744,7 +780,13 @@ impl WarpRuntime for InstanceManager {
             });
         };
         let ctx = running.ctx.clone();
-        self.do_stop(&ctx, running).await
+        let outcome = self.do_stop(&ctx, running).await?;
+        // P1 审查 R2#1：停止成功 → 移除代数登记，迟到崩溃事件不再生效。
+        self.current_run
+            .lock()
+            .expect("current_run lock poisoned")
+            .remove(&id);
+        Ok(outcome)
     }
 
     async fn restart(

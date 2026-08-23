@@ -274,11 +274,13 @@ async fn stop_on_missing_instance_is_404() {
 
 // ---------- Instances: restart ----------
 
+/// P1 审查 R2#1：restart 只写命令代数（202 受理），**不直接调用运行时**；
+/// 实际重启由 Reconciler 消费代数差完成。
 #[tokio::test]
-async fn restart_running_instance_invokes_runtime_and_returns_202() {
+async fn restart_running_instance_writes_generation_and_returns_202() {
     let app = TestApp::new().await;
     let id = create_instance(&app, "restartable").await;
-    // 布置实际状态：运行中（FakeWarpRuntime 同步 registry；需先注册条目）。
+    // 布置实际状态：运行中（快速失败 UX 的 registry 读）。
     let fake = app.runtime();
     let id_i = crate::runtime::instance::InstanceId::from_db(id).unwrap();
     fake.registry().insert(id_i);
@@ -288,7 +290,19 @@ async fn restart_running_instance_invokes_runtime_and_returns_202() {
         .request(Method::POST, &format!("/api/v1/instances/{id}/restart"))
         .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    assert_eq!(fake.restarted_ids(), vec![id]);
+    // 运行时未被触碰（Reconciler 才是唯一写者）。
+    assert!(
+        fake.restarted_ids().is_empty(),
+        "API 不得直接调用 runtime.restart"
+    );
+    // 命令代数已写入期望侧。
+    let gen: i64 =
+        sqlx::query_scalar("SELECT restart_command_generation FROM warp_instances WHERE id = ?")
+            .bind(id)
+            .fetch_one(&app.pool_for_test())
+            .await
+            .unwrap();
+    assert_eq!(gen, 1, "restart 命令必须递增 restart_command_generation");
     app.close().await;
 }
 
@@ -317,15 +331,17 @@ async fn restart_missing_instance_is_404() {
 
 // ---------- Instances: delete ----------
 
+/// P1 审查 R2#1：delete 只删期望行 + 触发收敛（202 受理）；运行中实例由
+/// Reconciler 孤儿收敛停止——API 不直接碰运行时。
 #[tokio::test]
-async fn delete_removes_instance_and_returns_204() {
+async fn delete_removes_instance_and_returns_202() {
     let app = TestApp::new().await;
     let id = create_instance(&app, "ephemeral").await;
 
     let resp = app
         .request(Method::DELETE, &format!("/api/v1/instances/{id}"))
         .await;
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
     let resp = app
         .request(Method::GET, &format!("/api/v1/instances/{id}"))

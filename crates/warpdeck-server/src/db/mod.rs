@@ -97,7 +97,7 @@ mod tests {
         let (url, db_path) = temp_db_url();
         let pool = connect(&url).await.unwrap();
 
-        assert_eq!(migrations::applied_count(&pool).await.unwrap(), 6);
+        assert_eq!(migrations::applied_count(&pool).await.unwrap(), 7);
         assert_eq!(
             table_columns(&pool, "settings").await,
             vec!["key", "value", "updated_at"]
@@ -114,7 +114,7 @@ mod tests {
         pool.close().await;
 
         let pool = connect(&url).await.unwrap();
-        assert_eq!(migrations::applied_count(&pool).await.unwrap(), 6);
+        assert_eq!(migrations::applied_count(&pool).await.unwrap(), 7);
 
         pool.close().await;
         cleanup_temp_db(&db_path);
@@ -230,7 +230,7 @@ mod tests {
 
         // 升级：当前内嵌 migration 集合应追加 0003/0004/0005。
         migrations::run(&pool).await.unwrap();
-        assert_eq!(migrations::applied_count(&pool).await.unwrap(), 6);
+        assert_eq!(migrations::applied_count(&pool).await.unwrap(), 7);
 
         // 旧数据完好。
         let v: String =
@@ -335,7 +335,7 @@ mod tests {
 
         // 升级：0004/0005 追加执行。
         migrations::run(&pool).await.unwrap();
-        assert_eq!(migrations::applied_count(&pool).await.unwrap(), 6);
+        assert_eq!(migrations::applied_count(&pool).await.unwrap(), 7);
 
         // 老数据完好：secrets 密文原样、kind 两种、profile_id 为 NULL（全局语义）。
         let (kind, ciphertext, profile_id): (String, Vec<u8>, Option<i64>) = sqlx::query_as(
