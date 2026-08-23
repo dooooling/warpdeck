@@ -33,7 +33,7 @@ services:
     # P1 审查 R2#6：必须 tmpfs，不得跨容器重建持久化（旧 named volume 会残留
     # socket/PID 文件）。仅 /var/lib/warpdeck 需要真实持久化。
     tmpfs:
-      - /run/warpdeck:tmpfs-mode=0700,size=64m
+      - /run/warpdeck:size=64m,mode=0700
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/api/v1/health"]
       interval: 15s
