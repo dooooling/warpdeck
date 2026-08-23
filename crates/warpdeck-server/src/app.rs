@@ -192,6 +192,51 @@ fn api_not_found(method: &str, path: &str, request_id: &str) -> axum::response::
         .into_response()
 }
 
+/// 测试用 GOST 桩（P1 审查 #4）：可注入 actual 状态、记录 stop/apply。
+#[derive(Default)]
+pub struct FakeProxyRuntime {
+    inner: std::sync::Mutex<FakeProxyRuntimeInner>,
+}
+
+#[derive(Default)]
+struct FakeProxyRuntimeInner {
+    status: Option<crate::proxy::ProxyStatus>,
+    stops: usize,
+    applies: Vec<crate::proxy::GostSettings>,
+}
+
+impl FakeProxyRuntime {
+    #[doc(hidden)]
+    pub fn set_status(&self, status: Option<crate::proxy::ProxyStatus>) {
+        self.inner.lock().unwrap().status = status;
+    }
+
+    #[doc(hidden)]
+    pub fn stop_count(&self) -> usize {
+        self.inner.lock().unwrap().stops
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::reconciler::ProxyApplier for FakeProxyRuntime {
+    async fn apply_config(&self, settings: &crate::proxy::GostSettings) -> Result<(), String> {
+        self.inner.lock().unwrap().applies.push(settings.clone());
+        Ok(())
+    }
+
+    async fn status(&self) -> Option<crate::proxy::ProxyStatus> {
+        self.inner.lock().unwrap().status.clone()
+    }
+
+    async fn stop(&self) -> Result<(), String> {
+        self.inner.lock().unwrap().stops += 1;
+        let mut inner = self.inner.lock().unwrap();
+        inner.status = Some(crate::proxy::ProxyStatus::Stopped);
+        drop(inner);
+        Ok(())
+    }
+}
+
 /// 集成测试辅助（P1-010 / §6.4 L2；P7/P8 API 测试复用）：
 /// 每个 TestApp 拥有独立临时 SQLite（§25.10），不共享开发者个人数据库。
 #[doc(hidden)]
@@ -201,6 +246,8 @@ pub struct TestApp {
     state: ApiState,
     /// fake runtime（动作断言用）。
     runtime: Arc<FakeWarpRuntime>,
+    /// fake GOST（actual 状态/stop 断言用，P1 审查 #4）。
+    gost: std::sync::Arc<FakeProxyRuntime>,
     /// Web UI 静态目录（临时目录 + 占位 index.html）。
     ui: tempfile::TempDir,
     /// 持久化数据目录（临时目录；日志源枚举/历史测试）。
@@ -233,6 +280,7 @@ impl TestApp {
         // 日志源枚举/历史测试需要独立 data dir（与 SQLite 临时库同生命周期）。
         let data = tempfile::tempdir().expect("failed to create data temp dir");
         let data_dir_path = data.path().to_path_buf();
+        let gost = std::sync::Arc::new(FakeProxyRuntime::default());
         let state = ApiState::new(
             db::repo::instance_repo(pool.clone()),
             Arc::new(db::repo::SqliteProxyConfigRepository::new(pool.clone())),
@@ -253,6 +301,8 @@ impl TestApp {
             data_dir_path.clone(),
             Arc::new(Notify::new()),
             env!("CARGO_PKG_VERSION").to_string(),
+            gost.clone(),
+            crate::reconciler::new_apply_error_slot(),
         );
         let ui = tempfile::tempdir().expect("failed to create ui temp dir");
         std::fs::write(
@@ -265,6 +315,7 @@ impl TestApp {
             db_path,
             state,
             runtime,
+            gost,
             ui,
             data,
             session_id: None,
@@ -426,6 +477,11 @@ impl TestApp {
     /// fake runtime（启动/停止/重启断言）。
     pub fn runtime(&self) -> Arc<FakeWarpRuntime> {
         self.runtime.clone()
+    }
+
+    /// fake GOST 桩（actual 状态注入 / stop 计数断言，P1 审查 #4）。
+    pub fn gost(&self) -> std::sync::Arc<FakeProxyRuntime> {
+        self.gost.clone()
     }
 
     /// 导出 state 供测试自建请求（需要自定义 body 的用例）。

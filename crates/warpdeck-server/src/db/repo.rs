@@ -114,6 +114,24 @@ pub trait WarpInstanceRepository: Send + Sync {
     ) -> Result<(), RepoError>;
     /// 绑定到指定档案的实例数（§16.9：WARP+ 单实例约束的支撑查询）。
     async fn count_bound_to_profile(&self, profile_id: i64) -> Result<usize, RepoError>;
+
+    /// v0.2 §17.4 改绑（P1 审查 #5 原子版）：§16.9 WARP+ 单实例检查与写入在
+    /// 同一 `BEGIN IMMEDIATE` 事务内完成。目标档案为 warp_plus 且已被其他
+    /// 实例绑定时返回 `Err(RepoError::ProfileAlreadyBound)`；改绑到当前已绑
+    /// 档案（幂等）不受限。
+    async fn rebind_profile_guarded(
+        &self,
+        id: InstanceId,
+        account_profile_id: Option<i64>,
+    ) -> Result<(), RepoError>;
+
+    /// 创建实例（P1 审查 #5 原子版）：绑定 WARP+ 档案时与 `rebind_profile_guarded`
+    /// 受同一事务守卫约束。
+    async fn create_guarded(
+        &self,
+        name: &str,
+        account_profile_id: Option<i64>,
+    ) -> Result<WarpInstanceSpec, RepoError>;
 }
 
 /// 仓储错误（不携带 secret）。
@@ -123,6 +141,9 @@ pub enum RepoError {
     Db(String),
     #[error("desired state column corrupted: {0}")]
     CorruptDesiredState(String),
+    /// §16.9：目标 WARP+ 档案已绑定其他实例（原子守卫拒绝；API 映射 409）。
+    #[error("warp_plus profile {0} already bound to another instance")]
+    ProfileAlreadyBound(i64),
 }
 
 impl From<sqlx::Error> for RepoError {
@@ -296,6 +317,92 @@ impl WarpInstanceRepository for SqliteWarpInstanceRepository {
             .await?;
         Ok(row.get::<i64, _>(0) as usize)
     }
+
+    async fn rebind_profile_guarded(
+        &self,
+        id: InstanceId,
+        account_profile_id: Option<i64>,
+    ) -> Result<(), RepoError> {
+        // BEGIN IMMEDIATE：写事务在检查前即持有保留锁，串行化并发绑定竞争。
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_warp_plus_bindable(&mut tx, account_profile_id, Some(id.as_i64())).await?;
+        sqlx::query(
+            "UPDATE warp_instances SET account_profile_id = ?, restart_pending = 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        )
+        .bind(account_profile_id)
+        .bind(id.as_i64())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await.map_err(RepoError::from)
+    }
+
+    async fn create_guarded(
+        &self,
+        name: &str,
+        account_profile_id: Option<i64>,
+    ) -> Result<WarpInstanceSpec, RepoError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_warp_plus_bindable(&mut tx, account_profile_id, None).await?;
+        let id = sqlx::query("INSERT INTO warp_instances (name, account_profile_id) VALUES (?, ?)")
+            .bind(name)
+            .bind(account_profile_id)
+            .execute(&mut *tx)
+            .await?
+            .last_insert_rowid();
+        let spec = sqlx::query(&format!(
+            "SELECT {SPEC_COLUMNS} FROM warp_instances WHERE id = ?"
+        ))
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| RepoError::Db("row vanished after insert".into()));
+        let spec = spec.and_then(|row| row_to_spec(&row));
+        tx.commit().await?;
+        spec
+    }
+}
+/// §16.9 守卫（调用方必须已处于 `BEGIN IMMEDIATE` 事务内）：目标档案存在且为
+/// warp_plus 模式时，要求除 `exclude_instance_id`（改绑自身幂等）外无其他实例
+/// 绑定；否则返回 `ProfileAlreadyBound`。非 warp_plus / None 恒通过。
+async fn ensure_warp_plus_bindable(
+    conn: &mut sqlx::SqliteConnection,
+    profile_id: Option<i64>,
+    exclude_instance_id: Option<i64>,
+) -> Result<(), RepoError> {
+    use sqlx::Row;
+    let Some(pid) = profile_id else {
+        return Ok(());
+    };
+    let mode: Option<String> = sqlx::query("SELECT mode FROM account_profiles WHERE id = ?")
+        .bind(pid)
+        .fetch_optional(&mut *conn)
+        .await?
+        .map(|r| r.get(0));
+    // 档案不存在 → 放行由 FK 在写入时报错（API 层已先行校验存在性）。
+    if mode.as_deref() != Some("warp_plus") {
+        return Ok(());
+    }
+    let bound: i64 = match exclude_instance_id {
+        Some(self_id) => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM warp_instances WHERE account_profile_id = ? AND id != ?",
+            )
+            .bind(pid)
+            .bind(self_id)
+            .fetch_one(&mut *conn)
+            .await?
+        }
+        None => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM warp_instances WHERE account_profile_id = ?")
+                .bind(pid)
+                .fetch_one(&mut *conn)
+                .await?
+        }
+    };
+    if bound > 0 {
+        return Err(RepoError::ProfileAlreadyBound(pid));
+    }
+    Ok(())
 }
 
 /// 代理期望配置（proxy_config 单行 → GostSettings 的中间形态；P6 只读）。
@@ -634,5 +741,103 @@ mod tests {
         let mut stopped = base.clone();
         stopped.desired_state = DesiredState::Stopped;
         assert!(!stopped.should_run());
+    }
+
+    // ---------- §16.9 WARP+ 单实例原子守卫（P1 审查 #5） ----------
+
+    async fn seed_profile(pool: &SqlitePool, pid: i64, mode: &str) {
+        sqlx::query("INSERT INTO account_profiles (id, name, mode) VALUES (?, ?, ?)")
+            .bind(pid)
+            .bind(format!("profile-{pid}"))
+            .bind(mode)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_guarded_rejects_second_warp_plus_binding() {
+        let (url, db_path) = temp_db_url();
+        let pool = crate::db::connect(&url).await.unwrap();
+        let repo = SqliteWarpInstanceRepository::new(pool.clone());
+        seed_profile(&pool, 10, "warp_plus").await;
+
+        repo.create_guarded("first", Some(10)).await.unwrap();
+        let second = repo.create_guarded("second", Some(10)).await.unwrap_err();
+        assert!(
+            matches!(second, RepoError::ProfileAlreadyBound(10)),
+            "第二个 WARP+ 绑定必须被原子守卫拒绝: {second:?}"
+        );
+
+        // 非 warp_plus 档案不受限。
+        seed_profile(&pool, 11, "free").await;
+        repo.create_guarded("third", Some(11)).await.unwrap();
+        repo.create_guarded("fourth", Some(11)).await.unwrap();
+
+        pool.close().await;
+        cleanup_temp_db(&db_path);
+    }
+
+    #[tokio::test]
+    async fn rebind_guarded_is_atomic_and_self_rebind_idempotent() {
+        let (url, db_path) = temp_db_url();
+        let pool = crate::db::connect(&url).await.unwrap();
+        let repo = SqliteWarpInstanceRepository::new(pool.clone());
+        seed_profile(&pool, 20, "warp_plus").await;
+        seed_profile(&pool, 21, "warp_plus").await;
+
+        let a = repo.create_guarded("a", Some(20)).await.unwrap();
+        let b = repo.create("b", None).await.unwrap();
+
+        // b 抢占 21 → OK；随后 b 改绑同一档案（幂等）→ 不受自身排除保护。
+        repo.rebind_profile_guarded(b.id, Some(21)).await.unwrap();
+        repo.rebind_profile_guarded(b.id, Some(21)).await.unwrap();
+
+        // a 想要已被 b 占用的 21 → 冲突。
+        let err = repo
+            .rebind_profile_guarded(a.id, Some(21))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RepoError::ProfileAlreadyBound(21)));
+
+        // b 让出（解绑回 free）后，a 即可绑定 21。
+        repo.rebind_profile_guarded(b.id, None).await.unwrap();
+        repo.rebind_profile_guarded(a.id, Some(21)).await.unwrap();
+        assert_eq!(
+            repo.get(b.id).await.unwrap().unwrap().account_profile_id,
+            None
+        );
+
+        pool.close().await;
+        cleanup_temp_db(&db_path);
+    }
+
+    /// 竞态回归：并发 create_guarded 同一 WARP+ 档案，恰好一个成功。
+    #[tokio::test]
+    async fn concurrent_warp_plus_creates_admit_exactly_one() {
+        let (url, db_path) = temp_db_url();
+        let pool = crate::db::connect(&url).await.unwrap();
+        let repo = instance_repo(pool.clone());
+        seed_profile(&pool, 30, "warp_plus").await;
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for n in 0..6 {
+            let r = repo.clone();
+            tasks.spawn(async move { r.create_guarded(&format!("race-{n}"), Some(30)).await });
+        }
+        let mut ok = 0;
+        let mut conflicts = 0;
+        while let Some(res) = tasks.join_next().await {
+            match res.unwrap() {
+                Ok(_) => ok += 1,
+                Err(RepoError::ProfileAlreadyBound(_)) => conflicts += 1,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert_eq!(ok, 1, "恰好一个赢家");
+        assert_eq!(conflicts, 5, "其余全部被守卫拒绝");
+
+        pool.close().await;
+        cleanup_temp_db(&db_path);
     }
 }

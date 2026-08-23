@@ -42,6 +42,35 @@ pub const DEFAULT_BACKOFF_MAX: Duration = Duration::from_secs(300);
 pub trait ProxyApplier: Send + Sync {
     /// 应用期望代理配置（GOST 幂等：diff 后跳过或 apply+restart）。
     async fn apply_config(&self, settings: &GostSettings) -> Result<(), String>;
+
+    /// GOST 当前**实际**状态（P1 审查 #4：actual state 必须可观测）。
+    /// None = 该实现不追踪（fake 缺省）。
+    async fn status(&self) -> Option<crate::proxy::ProxyStatus> {
+        None
+    }
+
+    /// 显式停止 GOST（P1 审查 #4：期望 = 无任何 listener 时，实际必须无进程；
+    /// GostConfig 本身拒绝全关配置，因此「全关」只能走 stop 而非 apply）。
+    async fn stop(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// 最近一次代理配置应用失败摘要（API `/system/status` 直出；P1 审查 #3/#4：
+/// 应用失败绝不伪装成功）。成功应用后清空。fail-closed 跳过同样记入，
+/// 让「密码不可用 → 保持旧配置」在 UI 可见而非只有日志。
+pub type ApplyErrorSlot = Arc<std::sync::Mutex<Option<ApplyError>>>;
+
+/// 单条应用失败记录。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyError {
+    pub error: String,
+    pub at_rfc3339: String,
+}
+
+/// 构造空的失败槽（main / 测试装配用）。
+pub fn new_apply_error_slot() -> ApplyErrorSlot {
+    Arc::new(std::sync::Mutex::new(None))
 }
 
 /// 由 `proxy_config` 仓库行构造 GOST 期望配置（无密码版本；
@@ -76,6 +105,8 @@ pub struct Reconciler {
     /// 关停信号（main 收到 SIGTERM 后置位）。
     shutdown: watch::Receiver<bool>,
     bus: EventBus,
+    /// 最近一次代理应用失败（API /system/status 消费；成功后清空）。
+    apply_error: ApplyErrorSlot,
 }
 
 impl Reconciler {
@@ -96,6 +127,7 @@ impl Reconciler {
         trigger: Arc<Notify>,
         shutdown: watch::Receiver<bool>,
         bus: EventBus,
+        apply_error: ApplyErrorSlot,
     ) -> Self {
         Self {
             repo,
@@ -112,6 +144,7 @@ impl Reconciler {
             trigger,
             shutdown,
             bus,
+            apply_error,
         }
     }
 
@@ -374,6 +407,27 @@ impl Reconciler {
             }
         };
         let mut settings = proxy_config_to_gost(&cfg);
+
+        // P1 审查 #4：期望 = 两个 listener 全关时，实际必须**显式停 GOST**
+        // （GostConfig 拒绝全关渲染，旧进程会继续监听 → UI 显示已关但端口仍开）。
+        if !settings.socks5_enabled && !settings.http_enabled {
+            match self.proxy.stop().await {
+                Ok(()) => {
+                    debug!(
+                        component = "reconciler",
+                        "gost stopped (no listeners enabled)"
+                    );
+                    self.clear_apply_error();
+                }
+                Err(e) => {
+                    let msg = format!("gost stop failed: {e}");
+                    error!(component = "reconciler", error = %e, "gost stop failed");
+                    self.record_apply_error(msg);
+                }
+            }
+            return;
+        }
+
         if cfg.auth_enabled {
             match self
                 .secrets
@@ -387,6 +441,12 @@ impl Reconciler {
                     });
                 }
                 Ok(None) => {
+                    // fail-closed（P0 审查 #2）+ 失败上浮（P1 审查 #3/#4）：
+                    // 保持上一份已验证配置，但必须在 API 可见，而非只有日志。
+                    self.record_apply_error(
+                        "proxy auth enabled but password missing; keeping last applied config (fail-closed)"
+                            .to_string(),
+                    );
                     error!(
                         component = "reconciler",
                         "proxy auth enabled but password missing; keeping last applied config (fail-closed, no anonymous downgrade)"
@@ -394,6 +454,9 @@ impl Reconciler {
                     return;
                 }
                 Err(e) => {
+                    self.record_apply_error(format!(
+                        "failed to read proxy password; keeping last applied config (fail-closed): {e}"
+                    ));
                     error!(
                         component = "reconciler",
                         error = %e,
@@ -404,9 +467,27 @@ impl Reconciler {
             }
         }
         match self.proxy.apply_config(&settings).await {
-            Ok(()) => debug!(component = "reconciler", "proxy config applied"),
-            Err(e) => warn!(component = "reconciler", error = %e, "proxy config apply failed"),
+            Ok(()) => {
+                debug!(component = "reconciler", "proxy config applied");
+                self.clear_apply_error();
+            }
+            Err(e) => {
+                warn!(component = "reconciler", error = %e, "proxy config apply failed");
+                self.record_apply_error(format!("gost apply failed: {e}"));
+            }
         }
+    }
+
+    fn record_apply_error(&self, error: String) {
+        let mut slot = self.apply_error.lock().unwrap();
+        *slot = Some(ApplyError {
+            error,
+            at_rfc3339: self.clock.now_utc_rfc3339(),
+        });
+    }
+
+    fn clear_apply_error(&self) {
+        *self.apply_error.lock().unwrap() = None;
     }
 }
 

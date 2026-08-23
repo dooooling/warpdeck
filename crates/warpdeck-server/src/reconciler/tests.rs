@@ -42,6 +42,8 @@ use crate::runtime::registry::{RuntimeRegistry, RuntimeState};
 struct FakeProxyApplier {
     applied: std::sync::Mutex<Vec<GostSettings>>,
     fail_next: std::sync::atomic::AtomicBool,
+    /// stop() 调用次数（P1 审查 #4：全关 listener 必须显式停 GOST）。
+    stops: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -54,6 +56,11 @@ impl ProxyApplier for FakeProxyApplier {
             return Err("injected proxy failure".into());
         }
         self.applied.lock().unwrap().push(settings.clone());
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), String> {
+        self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 }
@@ -171,6 +178,26 @@ impl WarpInstanceRepository for FlakyRepo {
         self.fail()?;
         self.inner.count_bound_to_profile(profile_id).await
     }
+
+    async fn rebind_profile_guarded(
+        &self,
+        id: crate::runtime::instance::InstanceId,
+        account_profile_id: Option<i64>,
+    ) -> Result<(), RepoError> {
+        self.fail()?;
+        self.inner
+            .rebind_profile_guarded(id, account_profile_id)
+            .await
+    }
+
+    async fn create_guarded(
+        &self,
+        name: &str,
+        account_profile_id: Option<i64>,
+    ) -> Result<crate::db::repo::WarpInstanceSpec, RepoError> {
+        self.fail()?;
+        self.inner.create_guarded(name, account_profile_id).await
+    }
 }
 
 /// 测试环境装配：真实 repo + Fake runtime + 共享 registry + ManualClock。
@@ -200,6 +227,7 @@ impl TestEnv {
         let secrets = Arc::new(SqliteSecretStore::new(pool.clone(), [9u8; 32]));
         let clock = Arc::new(ManualClock::new());
         let (_, shutdown) = tokio::sync::watch::channel(false);
+        let apply_error = crate::reconciler::new_apply_error_slot();
         let reconciler = Reconciler::new(
             repo.clone(),
             proxy_repo.clone(),
@@ -215,6 +243,7 @@ impl TestEnv {
             Arc::new(tokio::sync::Notify::new()),
             shutdown,
             EventBus::default(),
+            apply_error,
         );
         Self {
             repo,
@@ -639,6 +668,51 @@ async fn proxy_password_read_failure_keeps_last_applied_authenticated_config() {
     );
 }
 
+/// P1 审查 #3/#4：两个 listener 全关 → 显式 stop GOST（而非 apply 全关配置
+/// ——GostConfig 本就拒绝渲染），且 apply_error 槽位保持干净。
+#[tokio::test]
+async fn proxy_both_listeners_disabled_stops_gost() {
+    let env = TestEnv::new().await;
+    let cfg = ProxyConfig {
+        socks5_enabled: false,
+        http_enabled: false,
+        ..ProxyConfig::default_enabled()
+    };
+    env.proxy_repo.update(&cfg).await.unwrap();
+
+    let slot = crate::reconciler::new_apply_error_slot();
+    // 用带槽位的 reconciler 跑一轮：直接复用 env 的字段拼装。
+    let (_, shutdown) = tokio::sync::watch::channel(false);
+    let r = Reconciler::new(
+        env.repo.clone(),
+        env.proxy_repo.clone(),
+        env.runtime.clone(),
+        env.registry.clone(),
+        env.proxy.clone(),
+        env.secrets.clone(),
+        env.clock.clone(),
+        PathBuf::from("/tmp/warpdeck-test/data"),
+        PathBuf::from("/tmp/warpdeck-test/run"),
+        DEFAULT_BACKOFF_BASE,
+        DEFAULT_BACKOFF_MAX,
+        Arc::new(tokio::sync::Notify::new()),
+        shutdown,
+        EventBus::default(),
+        slot,
+    );
+    r.reconcile_once().await;
+
+    assert_eq!(
+        env.proxy.stops.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "全关 listener 必须显式停 GOST"
+    );
+    assert!(
+        env.proxy.applied.lock().unwrap().is_empty(),
+        "全关时不得调用 apply（GostConfig 拒绝无 listener 渲染）"
+    );
+}
+
 #[tokio::test]
 async fn proxy_apply_failure_does_not_block_instances() {
     let env = TestEnv::new().await;
@@ -831,6 +905,7 @@ async fn manager_restart_recovers_desired_state() {
         Arc::new(tokio::sync::Notify::new()),
         shutdown,
         EventBus::default(),
+        crate::reconciler::new_apply_error_slot(),
     );
 
     reconciler2.reconcile_once().await;
@@ -874,6 +949,7 @@ async fn db_transient_failure_is_contained_and_recovers() {
         Arc::new(tokio::sync::Notify::new()),
         shutdown,
         EventBus::default(),
+        crate::reconciler::new_apply_error_slot(),
     );
 
     // DB 不可用：不 start、不 apply proxy。

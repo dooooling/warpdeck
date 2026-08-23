@@ -24,12 +24,15 @@ export function DashboardPage() {
   }
   const counts = status.data.instances
   const runningInstances = instances.data ?? []
+  // P1 审查 #4：优先展示 GOST 实际状态；后端未追踪时退回期望推断。
+  const gost = proxy.data?.actual
   const proxyStatus =
     proxy.data === undefined
       ? t('common.dash')
-      : proxy.data.socks5_enabled && proxy.data.http_enabled
-        ? t('dashboard.proxyRunning')
-        : t('dashboard.proxyPartial')
+      : (gost?.status ??
+        (proxy.data.socks5_enabled && proxy.data.http_enabled
+          ? t('dashboard.proxyRunning')
+          : t('dashboard.proxyPartial')))
   const version = status.data.version
 
   return (
@@ -40,6 +43,13 @@ export function DashboardPage() {
           {t('dashboard.meta', { version, uptime: formatUptime(status.data.uptime_secs) })}
         </span>
       </header>
+
+      {status.data.last_apply_error ? (
+        <div className="form-error" role="alert">
+          <strong>{t('proxy.lastApplyError')}:</strong>{' '}
+          <span className="mono">{status.data.last_apply_error.error}</span>
+        </div>
+      ) : null}
 
       <div className="stat-grid">
         <div className="stat-card">
@@ -113,6 +123,13 @@ export function DashboardPage() {
                 <td>:18080</td>
                 <td>{proxy.data.http_enabled ? t('common.on') : t('common.off')}</td>
               </tr>
+              {gost ? (
+                <tr>
+                  <th scope="row">{t('proxy.actualStatus')}</th>
+                  <td className={`mono state-${gost.status}`}>{gost.status}</td>
+                  <td>{gost.reason ?? ''}</td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         )}

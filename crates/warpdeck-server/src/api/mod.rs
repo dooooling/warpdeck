@@ -79,6 +79,10 @@ pub struct ApiState {
     pub trigger: Arc<Notify>,
     pub started_at: Instant,
     pub version: String,
+    /// P1 审查 #4：GOST 实际状态查询（与 reconciler 共享同一 Arc）。
+    pub proxy_applier: Arc<dyn crate::reconciler::ProxyApplier>,
+    /// P1 审查 #3：最近一次代理应用失败（成功后清空；UI 直出）。
+    pub apply_error: crate::reconciler::ApplyErrorSlot,
 }
 
 impl ApiState {
@@ -100,6 +104,8 @@ impl ApiState {
         data_dir: PathBuf,
         trigger: Arc<Notify>,
         version: String,
+        proxy_applier: Arc<dyn crate::reconciler::ProxyApplier>,
+        apply_error: crate::reconciler::ApplyErrorSlot,
     ) -> Self {
         Self {
             instances,
@@ -119,6 +125,8 @@ impl ApiState {
             trigger,
             started_at: Instant::now(),
             version,
+            proxy_applier,
+            apply_error,
         }
     }
 

@@ -37,7 +37,15 @@ pub async fn get(
         .map_err(secret_error)
         .map_err(|e| e.into_response_with(&request_id))?;
     let _ = user;
-    Ok(Json(ProxyConfigView::from_config(&cfg, password_present)))
+    // P1 审查 #4：附上 GOST 实际状态（desired ≠ actual 必须可见）。
+    let actual = state
+        .proxy_applier
+        .status()
+        .await
+        .map(|s| crate::api::dto::ProxyActualView::from_status(&s));
+    Ok(Json(
+        ProxyConfigView::from_config(&cfg, password_present).with_actual(actual),
+    ))
 }
 
 /// `PUT /api/v1/proxy`：部分更新期望配置并触发收敛。返回更新后视图。
@@ -104,10 +112,16 @@ pub async fn update(
         .map_err(repo_error)
         .map_err(|e| e.into_response_with(&request_id))?;
     state.notify_change();
-    Ok(Json(ProxyConfigView::from_config(
-        &updated,
-        password_present,
-    )))
+    // P1 审查 #3：PUT 返回的视图同样携带 GOST 实际状态——apply 尚未发生时
+    // actual 反映旧状态，UI 据此展示「配置已保存，等待收敛」，不伪装成功。
+    let actual = state
+        .proxy_applier
+        .status()
+        .await
+        .map(|s| crate::api::dto::ProxyActualView::from_status(&s));
+    Ok(Json(
+        ProxyConfigView::from_config(&updated, password_present).with_actual(actual),
+    ))
 }
 
 fn secret_error(e: crate::crypto::secret_store::SecretStoreError) -> ApiError {

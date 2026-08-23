@@ -5,12 +5,16 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Value};
 
-use crate::api::dto::{InstanceCountsView, SystemStatusView};
+use crate::api::dto::{
+    InstanceCountsView, LastApplyErrorView, SystemComponentsView, SystemStatusView,
+};
 use crate::api::middleware::AuthUser;
 use crate::api::{ApiResult, ApiState};
+use crate::crypto::secret_store::SecretKind;
 use crate::observability::RequestId;
 
-/// `GET /api/v1/system/status`（P7-003）：进程存活 + 实例统计。
+/// `GET /api/v1/system/status`（P7-003）：进程存活 + 实例统计 + 组件
+/// operational 状态（P1 审查 #4：GOST/secret store 的真实健康，而非恒 ok）。
 pub async fn status(
     State(state): State<ApiState>,
     RequestId(_rid): RequestId,
@@ -18,11 +22,34 @@ pub async fn status(
 ) -> ApiResult<Json<SystemStatusView>> {
     let snapshots = state.registry.list();
     let counts = InstanceCountsView::from_runtime(&snapshots);
+
+    // GOST actual（P1 审查 #4）。
+    let gost_view = match state.proxy_applier.status().await {
+        Some(s) => crate::api::dto::ProxyActualView::from_status(&s),
+        None => crate::api::dto::ProxyActualView {
+            status: "unknown".into(),
+            pid: None,
+            exit_code: None,
+            reason: None,
+        },
+    };
+    // secret store 读探针：能回答「密码是否存在」即视为可用。
+    let secret_store = match state.secrets.exists(SecretKind::ProxyPassword).await {
+        Ok(_) => "ok",
+        Err(_) => "unavailable",
+    };
+
     Ok(Json(SystemStatusView {
         status: "ok",
         version: state.version.clone(),
         uptime_secs: state.started_at.elapsed().as_secs(),
         instances: counts,
+        components: SystemComponentsView {
+            gost: gost_view.status,
+            gost_reason: gost_view.reason,
+            secret_store,
+        },
+        last_apply_error: LastApplyErrorView::from_slot(&state.apply_error),
     }))
 }
 

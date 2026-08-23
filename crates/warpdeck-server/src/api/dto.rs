@@ -210,6 +210,10 @@ pub struct ProxyConfigView {
     pub allowed_ips: Vec<String>,
     pub max_connections: Option<u32>,
     pub max_rps: Option<u32>,
+    /// GOST 实际状态（P1 审查 #4：desired ≠ actual 必须可见）。
+    /// None = 实现未追踪（测试 fake）；生产恒 Some。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<ProxyActualView>,
 }
 
 impl ProxyConfigView {
@@ -223,6 +227,58 @@ impl ProxyConfigView {
             allowed_ips: cfg.allowed_ips.clone(),
             max_connections: cfg.max_connections,
             max_rps: cfg.max_rps,
+            actual: None,
+        }
+    }
+
+    /// 附加实际状态（GET/PUT handler 在查询 GostManager 后调用）。
+    pub fn with_actual(mut self, actual: Option<ProxyActualView>) -> Self {
+        self.actual = actual;
+        self
+    }
+}
+
+/// GOST 数据面实际状态视图。
+/// `status`: `running` / `stopped` / `degraded` / `failed`。
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyActualView {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl ProxyActualView {
+    pub fn from_status(status: &crate::proxy::ProxyStatus) -> Self {
+        use crate::proxy::ProxyStatus as S;
+        match status {
+            S::Stopped => Self {
+                status: "stopped".into(),
+                pid: None,
+                exit_code: None,
+                reason: None,
+            },
+            S::Running { pid, .. } => Self {
+                status: "running".into(),
+                pid: Some(*pid),
+                exit_code: None,
+                reason: None,
+            },
+            S::Degraded { reason, pid } => Self {
+                status: "degraded".into(),
+                pid: *pid,
+                exit_code: None,
+                reason: Some(reason.clone()),
+            },
+            S::Failed { reason, exit_code } => Self {
+                status: "failed".into(),
+                pid: None,
+                exit_code: *exit_code,
+                reason: Some(reason.clone()),
+            },
         }
     }
 }
@@ -301,13 +357,46 @@ pub struct AccountView {
     pub zero_trust_org: Option<String>,
 }
 
-/// 系统状态（P7-003）。
+/// 系统状态（P7-003；P1 审查 #4 起含组件 operational 状态）。
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemStatusView {
     pub status: &'static str,
     pub version: String,
     pub uptime_secs: u64,
     pub instances: InstanceCountsView,
+    /// 组件级实际状态（liveness 之外的 readiness 信息）。
+    pub components: SystemComponentsView,
+    /// 最近一次代理配置应用失败（None = 当前配置已成功应用/停止）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_apply_error: Option<LastApplyErrorView>,
+}
+
+/// 组件 operational 视图（P1 审查 #4）。
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemComponentsView {
+    /// GOST 数据面：`running` / `stopped` / `degraded` / `failed`。
+    pub gost: String,
+    /// GOST 非 Running 时的人类可读原因（Failed/Degraded 携带）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gost_reason: Option<String>,
+    /// secret store 可用性（读探针；`ok` / `unavailable`）。
+    pub secret_store: &'static str,
+}
+
+/// 最近一次代理应用失败（P1 审查 #3：绝不伪装成功）。
+#[derive(Debug, Clone, Serialize)]
+pub struct LastApplyErrorView {
+    pub error: String,
+    pub at_rfc3339: String,
+}
+
+impl LastApplyErrorView {
+    pub fn from_slot(slot: &crate::reconciler::ApplyErrorSlot) -> Option<Self> {
+        slot.lock().unwrap().as_ref().map(|e| Self {
+            error: e.error.clone(),
+            at_rfc3339: e.at_rfc3339.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Default)]

@@ -408,12 +408,22 @@ fn socket(port: u16) -> std::net::SocketAddr {
     std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port)
 }
 
-/// P6 reconciler 接缝实现：期望配置更新 + 幂等 apply。
+/// P6 reconciler 接缝实现：期望配置更新 + 幂等 apply + actual 状态查询/停止
+/// （P1 审查 #4：API/UI 必须能看到 GOST 真实状态，且「全关」必须能显式停进程）。
 #[async_trait::async_trait]
 impl crate::reconciler::ProxyApplier for GostManager {
     async fn apply_config(&self, settings: &GostSettings) -> Result<(), String> {
         self.update_settings(settings.clone());
         self.apply().await.map_err(|e| e.to_string())
+    }
+
+    async fn status(&self) -> Option<ProxyStatus> {
+        // GostManager::status 与 trait 方法同名：用完全限定调用消歧。
+        Some(GostManager::status(self).await)
+    }
+
+    async fn stop(&self) -> Result<(), String> {
+        GostManager::stop(self).await.map_err(|e| e.to_string())
     }
 }
 

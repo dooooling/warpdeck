@@ -179,12 +179,13 @@ async fn serve(cfg: config::AppConfig) {
     // --- reconciler（唯一写者：收敛 desired → actual）---
     let trigger = Arc::new(Notify::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let apply_error = warpdeck_server::reconciler::new_apply_error_slot();
     let mut reconciler = Reconciler::new(
         instances.clone(),
         proxy_repo.clone(),
         runtime.clone(),
         registry.clone(),
-        gost,
+        gost.clone(),
         secrets.clone(),
         clock,
         cfg.data_dir.clone(),
@@ -194,6 +195,7 @@ async fn serve(cfg: config::AppConfig) {
         trigger.clone(),
         shutdown_rx,
         bus.clone(),
+        apply_error.clone(),
     );
     tokio::spawn(async move {
         reconciler.run().await;
@@ -222,6 +224,8 @@ async fn serve(cfg: config::AppConfig) {
         cfg.data_dir.clone(),
         trigger,
         app_version(),
+        gost,
+        apply_error,
     );
     let router = app::router(state, cfg.ui_dir.clone());
     let listener = tokio::net::TcpListener::bind(cfg.web_bind)
