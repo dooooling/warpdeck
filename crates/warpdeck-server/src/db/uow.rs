@@ -245,12 +245,9 @@ impl ConsistencyService {
                 None => {}
             }
         }
-        sqlx::query(
-            "UPDATE warp_instances SET restart_pending = 1 WHERE account_profile_id = ? AND enabled = 1 AND desired_state = 'running'",
-        )
-        .bind(profile_id)
-        .execute(&mut *tx)
-        .await?;
+        // P1 审查 R4 次要项：被引用档案在 API 层只读（409 拒绝任何修改），
+        // 此处「标记绑定实例重启」的 UPDATE 不可能命中行——删除死逻辑，
+        // 消除与文档（§16.9 只读 vs 自动重启）的矛盾。
         tx.commit().await.map_err(ConsistencyError::from)
     }
 }

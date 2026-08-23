@@ -32,3 +32,4 @@ coverage/
 # OS
 Thumbs.db
 .DS_Store
+compose.override.yml

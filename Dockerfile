@@ -26,7 +26,7 @@ RUN pnpm build
 
 # ---------- rust builder ----------
 # 必须与 runtime 同系 glibc（ubuntu:24.04=glibc 2.39，rust:*-bookworm=2.36 兼容）。
-FROM rust:1.96 AS rust-builder
+FROM rust:1.96.0 AS rust-builder
 
 # 与 docker/Dockerfile.dev-rust 同款 aliyun sparse 源（国内网络）。
 RUN mkdir -p /usr/local/cargo \

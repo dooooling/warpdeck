@@ -90,7 +90,8 @@ impl DbusRuntime {
     }
 
     /// 停止 daemon：kill 后 reap 并返回退出状态。
-    pub async fn shutdown(mut self) -> ProcessStatus {
+    /// P1 审查 R4#2：改为 `&mut self`——失败时句柄仍归调用方，支持重试。
+    pub async fn shutdown(&mut self) -> ProcessStatus {
         let _ = self.process.kill();
         self.process.wait().await
     }
@@ -129,7 +130,7 @@ mod tests {
             .unwrap();
         tokio::fs::write(&ctx.paths.dbus_socket, b"").await.unwrap();
 
-        let runtime = DbusRuntime::start(&spawner, &ctx).await.unwrap();
+        let mut runtime = DbusRuntime::start(&spawner, &ctx).await.unwrap();
         assert_eq!(runtime.socket(), &ctx.paths.dbus_socket);
 
         let calls = spawner.spawn_calls();
@@ -171,7 +172,7 @@ mod tests {
             .unwrap();
         tokio::fs::write(&ctx.paths.dbus_socket, b"").await.unwrap();
 
-        let runtime = DbusRuntime::start(&spawner, &ctx).await.unwrap();
+        let mut runtime = DbusRuntime::start(&spawner, &ctx).await.unwrap();
         let pid = runtime.pid();
 
         let status = runtime.shutdown().await;

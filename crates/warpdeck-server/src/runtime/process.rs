@@ -187,16 +187,26 @@ where
     use std::io::Write as _;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
+    // lossy UTF-8 解码（非法字节替换为 U+FFFD 而非整体失败）。
     let mut reader = BufReader::new(reader);
-    let mut line = String::new();
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {
-                // 去掉行尾换行后脱敏，再统一补写 \n。
-                let trimmed = line.trim_end_matches(['\n', '\r']);
-                let scrubbed = crate::observability::redactor::scrub_line(trimmed);
+                let trimmed: &[u8] = match buf.last() {
+                    Some(b'\n') => {
+                        let mut t = &buf[..buf.len() - 1];
+                        if t.last() == Some(&b'\r') {
+                            t = &t[..t.len() - 1];
+                        }
+                        t
+                    }
+                    _ => &buf,
+                };
+                let scrubbed =
+                    crate::observability::redactor::scrub_line(&String::from_utf8_lossy(trimmed));
                 let _ = writeln!(file, "{scrubbed}");
             }
         }
