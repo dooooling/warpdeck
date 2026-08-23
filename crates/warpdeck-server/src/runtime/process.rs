@@ -463,19 +463,27 @@ mod tests {
             // 起始处覆写，总长只剩 600 且 b 全丢）。不强制段序——sh 对重定向
             // stdout 的缓冲策略（dash 逐写 / bash 块缓冲）会改变段间顺序，
             // 与「是否覆盖」正交。
-            // P1 审查 R3#7：输出经行级脱敏泵落盘——无换行的三段在 EOF 时合并为
-            // 一行并补写 \n，故总长 900+1；三段内容必须完整（防覆盖语义不变）。
-            assert_eq!(
-                content.len(),
-                901,
-                "总字节数（防覆盖，含补写换行）: {content}"
-            );
-            assert!(content.contains(&"a".repeat(300)), "stdout 首段: {content}");
+            // P1 审查 R3#7：输出经行级脱敏泵落盘——stdout/stderr 为两条独立
+            // 异步行，各自补 \n，总长 902；断言改为语义级：三段各 300 字节完整、
+            // 字符集仅 abc（任何字节被覆盖都会破坏其一）。
+            let compact: String = content.chars().filter(|&ch| ch != '\n').collect();
+            assert_eq!(compact.len(), 900, "总字节数（防覆盖）: {content}");
             assert!(
-                content.contains(&"b".repeat(300)),
+                compact.contains(&"a".repeat(300)),
+                "stdout 首段完整: {content}"
+            );
+            assert!(
+                compact.contains(&"b".repeat(300)),
                 "stderr 不得被后续 stdout 覆盖: {content}"
             );
-            assert!(content.contains(&"c".repeat(300)), "stdout 末段: {content}");
+            assert!(
+                compact.contains(&"c".repeat(300)),
+                "stdout 末段完整: {content}"
+            );
+            assert!(
+                compact.chars().all(|ch| matches!(ch, 'a' | 'b' | 'c')),
+                "不得出现覆写产生的混合字节: {content}"
+            );
         }
         #[cfg(not(unix))]
         {
