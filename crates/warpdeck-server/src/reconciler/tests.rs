@@ -32,6 +32,7 @@ use crate::db::repo::{
 use crate::db::{cleanup_temp_db, temp_db_url};
 use crate::proxy::{GostSettings, ProxyAuth};
 use crate::reconciler::{ProxyApplier, Reconciler, DEFAULT_BACKOFF_BASE, DEFAULT_BACKOFF_MAX};
+use crate::runtime::clock::Clock;
 use crate::runtime::events::EventBus;
 use crate::runtime::fake::{FakeWarpRuntime, ManualClock};
 use crate::runtime::instance::InstanceId;
@@ -1046,4 +1047,62 @@ async fn db_transient_failure_is_contained_and_recovers() {
         env.registry_state(spec.id),
         Some(RuntimeState::Healthy)
     ));
+}
+
+/// P1 审查 R3#1：Failed + auto_restart=false 时，显式重启命令必须执行——
+/// 不再永久悬空；完成后代数追平。
+#[tokio::test]
+async fn failed_state_manual_restart_command_overrides_auto_restart_policy() {
+    let env = TestEnv::new().await;
+    let spec = env.repo.create("inst-failed-manual", None).await.unwrap();
+    // 关闭自动重启并把实例置为 Failed。
+    env.repo
+        .set_desired(spec.id, true, DesiredState::Running)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE warp_instances SET auto_restart = 0 WHERE id = ?")
+        .bind(spec.id.as_i64())
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    env.set_registry_state(spec.id, RuntimeState::Failed);
+
+    let gen = env.repo.request_restart(spec.id).await.unwrap();
+    assert_eq!(gen, 1);
+
+    env.reconciler.reconcile_once().await;
+
+    assert_eq!(
+        env.runtime.restarted_ids(),
+        vec![spec.id.as_i64()],
+        "手动重启命令必须优先于 auto_restart=false 策略"
+    );
+    let after = env.repo.get(spec.id).await.unwrap().unwrap();
+    assert_eq!(after.observed_restart_generation, 1);
+}
+
+/// P1 审查 R3#1（auto_restart=true 分支）：手动命令不被退避窗口阻塞。
+#[tokio::test]
+async fn failed_state_manual_restart_bypasses_backoff_window() {
+    let env = TestEnv::new().await;
+    let spec = env.repo.create("inst-backoff-manual", None).await.unwrap();
+    env.set_registry_state(spec.id, RuntimeState::Failed);
+    // 制造活跃退避窗口。
+    env.repo
+        .record_backoff(
+            spec.id,
+            &env.clock.now_utc_rfc3339(),
+            Some("2999-01-01T00:00:00Z".to_string()),
+        )
+        .await
+        .unwrap();
+
+    env.repo.request_restart(spec.id).await.unwrap();
+    env.reconciler.reconcile_once().await;
+
+    assert_eq!(
+        env.runtime.restarted_ids(),
+        vec![spec.id.as_i64()],
+        "显式命令必须绕过退避窗口"
+    );
 }

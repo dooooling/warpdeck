@@ -177,6 +177,16 @@ pub fn parse_cidr(input: &str) -> Result<IpNetwork, ConfigError> {
                                 "IPv6 prefix must be <= 128, got {prefix}"
                             )));
                         }
+                        // P1 审查 R3 次要项：IPv6 与 IPv4 同等严格——主机位必须为零
+                        // （如 2001:db8::1/64 此前会被静默接受）。
+                        let host_bits = 128u32.saturating_sub(u32::from(prefix));
+                        let net_bits = u128::from(net) >> host_bits << host_bits;
+                        if u128::from(net) != net_bits {
+                            let zeroed: Ipv6Addr = net_bits.into();
+                            return Err(invalid(format!(
+                                "host bits set: use the network address (e.g. {zeroed}/{prefix} with host bits zeroed)"
+                            )));
+                        }
                         Ok(IpNetwork::V6 { net, prefix })
                     }
                     Err(_) => Err(invalid("address part is not a valid IP".into())),
@@ -472,6 +482,23 @@ chains:
     fn both_listeners_disabled_is_rejected() {
         let err = GostConfig::new(false, false, None, &[], None, None, vec![]).unwrap_err();
         assert!(matches!(err, ConfigError::NoListeners));
+    }
+
+    /// P1 审查 R3 次要项：IPv6 与 IPv4 同等严格——主机位非零拒绝。
+    #[test]
+    fn parse_cidr_rejects_ipv6_host_bits() {
+        assert!(
+            parse_cidr("2001:db8::1/64").is_err(),
+            "host bits set must fail"
+        );
+        assert!(matches!(
+            parse_cidr("2001:db8::/64"),
+            Ok(IpNetwork::V6 { prefix: 64, .. })
+        ));
+        assert!(matches!(
+            parse_cidr("::1/128"),
+            Ok(IpNetwork::V6 { prefix: 128, .. })
+        ));
     }
 
     #[test]

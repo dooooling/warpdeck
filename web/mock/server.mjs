@@ -32,6 +32,21 @@ const state = {
   nextInstanceId: 1,
   nextSessionId: 1,
   sessions: new Map(), // sid -> { user_id, csrf }
+  // v0.2 账号档案（P1 审查 R3#5：e2e 恢复覆盖 profiles 流程）
+  profiles: [
+    {
+      id: 1,
+      name: 'default',
+      mode: 'free',
+      zero_trust_org: null,
+      license_configured: false,
+      client_id_configured: false,
+      client_secret_configured: false,
+      instance_count: 0,
+      default: true,
+    },
+  ],
+  nextProfileId: 2,
   proxy: {
     socks5_enabled: true,
     http_enabled: true,
@@ -61,6 +76,20 @@ function reset() {
   state.nextInstanceId = 1
   state.nextSessionId = 1
   state.sessions.clear()
+  state.profiles = [
+    {
+      id: 1,
+      name: 'default',
+      mode: 'free',
+      zero_trust_org: null,
+      license_configured: false,
+      client_id_configured: false,
+      client_secret_configured: false,
+      instance_count: 0,
+      default: true,
+    },
+  ]
+  state.nextProfileId = 2
   state.proxy = {
     socks5_enabled: true,
     http_enabled: true,
@@ -165,6 +194,19 @@ const instanceView = (inst) => ({
   colo: inst.colo,
   latency_ms: inst.latency_ms,
   last_error: inst.last_error,
+})
+
+// v0.2 §17.6 档案视图（masked：永不回显 secret 明文）。
+const profileView = (p) => ({
+  id: p.id,
+  name: p.name,
+  mode: p.mode,
+  zero_trust_org: p.zero_trust_org,
+  license_configured: p.license_configured,
+  client_id_configured: p.client_id_configured,
+  client_secret_configured: p.client_secret_configured,
+  instance_count: p.instance_count,
+  default: Boolean(p.default),
 })
 
 // ---------- routes ----------
@@ -364,6 +406,93 @@ async function handleApi(req, res, url, method, requestId) {
     }
     state.instances.splice(idx, 1)
     sendNoContent(res)
+    return
+  }
+
+  // ---------- v0.2 账号档案（§17.6；masked 视图） ----------
+  if (url.pathname === '/api/v1/accounts' && method === 'GET') {
+    const session = requireAuth(req, res)
+    if (!session) return
+    sendJson(res, 200, state.profiles.map(profileView))
+    return
+  }
+
+  if (url.pathname === '/api/v1/accounts' && method === 'POST') {
+    const session = requireAuth(req, res, true)
+    if (!session) return
+    const body = await readBody(req)
+    const name = String(body.name ?? '').trim()
+    const mode = String(body.mode ?? '')
+    const org = body.zero_trust_org ? String(body.zero_trust_org) : null
+    if (!name) {
+      sendJson(res, 422, errorBody('VALIDATION', 'Name is required', requestId))
+      return
+    }
+    if (state.profiles.some((p) => p.name === name)) {
+      sendJson(res, 409, errorBody('CONFLICT', 'profile name already exists', requestId))
+      return
+    }
+    if (!['free', 'warp_plus', 'zero_trust'].includes(mode)) {
+      sendJson(res, 422, errorBody('VALIDATION', 'invalid mode', requestId))
+      return
+    }
+    // 与后端一致：warp_plus 必须 license；zero_trust 必须三件套（§16.9 校验）。
+    if (mode === 'warp_plus' && !body.license) {
+      sendJson(res, 422, errorBody('VALIDATION', 'WARP+ requires a license key', requestId))
+      return
+    }
+    if (mode === 'zero_trust' && (!org || !body.client_id || !body.client_secret)) {
+      sendJson(res, 422, errorBody('VALIDATION', 'zero_trust requires organization/client id/secret', requestId))
+      return
+    }
+    if (mode === 'free' && state.profiles.some((p) => p.mode === 'free')) {
+      sendJson(res, 409, errorBody('CONFLICT', 'free profile is unique and reserved', requestId))
+      return
+    }
+    const profile = {
+      id: state.nextProfileId++,
+      name,
+      mode,
+      zero_trust_org: org,
+      license_configured: Boolean(body.license),
+      client_id_configured: Boolean(body.client_id),
+      client_secret_configured: Boolean(body.client_secret),
+      instance_count: 0,
+      default: false,
+    }
+    state.profiles.push(profile)
+    sendJson(res, 201, profileView(profile))
+    return
+  }
+
+  const profileMatch = url.pathname.match(/^\/api\/v1\/accounts\/(\d+)$/)
+  if (profileMatch && (method === 'PATCH' || method === 'DELETE')) {
+    const session = requireAuth(req, res, method !== 'GET')
+    if (!session) return
+    const pid = Number(profileMatch[1])
+    const profile = state.profiles.find((p) => p.id === pid)
+    if (!profile) {
+      sendJson(res, 404, errorBody('NOT_FOUND', `profile ${pid} not found`, requestId))
+      return
+    }
+    if (method === 'DELETE') {
+      if (profile.default || profile.instance_count > 0) {
+        sendJson(res, 409, errorBody('CONFLICT', 'profile is protected or still bound', requestId))
+        return
+      }
+      state.profiles = state.profiles.filter((p) => p.id !== pid)
+      sendNoContent(res)
+      return
+    }
+    const body = await readBody(req)
+    // masked 语义：undefined/空 = 保持现有凭据。
+    if (body.name !== undefined) profile.name = String(body.name)
+    if (body.mode !== undefined) profile.mode = String(body.mode)
+    if (body.zero_trust_org !== undefined) profile.zero_trust_org = body.zero_trust_org || null
+    if (body.license) profile.license_configured = true
+    if (body.client_id) profile.client_id_configured = true
+    if (body.client_secret) profile.client_secret_configured = true
+    sendJson(res, 200, profileView(profile))
     return
   }
 

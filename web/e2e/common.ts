@@ -18,7 +18,8 @@ export async function loginAsAdmin(page: Page): Promise<void> {
   await page.getByLabel('Username').fill(USERNAME)
   await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
   await page.getByLabel('Confirm password').fill(PASSWORD)
-  await page.getByRole('button', { name: 'Create admin account' }).click()
+  // P1 审查 R3#5：与 i18n `setup.submit` 对齐（'Create account'）。
+  await page.getByRole('button', { name: 'Create account' }).click()
   await page.waitForURL('**/login')
   await loginWith(page, USERNAME, PASSWORD)
 }

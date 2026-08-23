@@ -20,7 +20,7 @@ test.describe('setup and login', () => {
     await page.getByLabel('Username').fill(USERNAME)
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
     await page.getByLabel('Confirm password').fill(PASSWORD)
-    await page.getByRole('button', { name: 'Create admin account' }).click()
+    await page.getByRole('button', { name: 'Create account' }).click()
 
     await page.waitForURL('**/login')
     // /setup 已锁定：直接访问回到登录页。
@@ -37,7 +37,7 @@ test.describe('setup and login', () => {
     await page.getByLabel('Username').fill(USERNAME)
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
     await page.getByLabel('Confirm password').fill('different-456')
-    await page.getByRole('button', { name: 'Create admin account' }).click()
+    await page.getByRole('button', { name: 'Create account' }).click()
     await expect(page.getByText('Passwords do not match')).toBeVisible()
   })
 
@@ -47,7 +47,7 @@ test.describe('setup and login', () => {
     await page.getByLabel('Username').fill(USERNAME)
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
     await page.getByLabel('Confirm password').fill(PASSWORD)
-    await page.getByRole('button', { name: 'Create admin account' }).click()
+    await page.getByRole('button', { name: 'Create account' }).click()
     await page.waitForURL('**/login')
 
     await page.getByLabel('Username').fill(USERNAME)
@@ -63,7 +63,7 @@ test.describe('setup and login', () => {
     await page.getByLabel('Username').fill(USERNAME)
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
     await page.getByLabel('Confirm password').fill(PASSWORD)
-    await page.getByRole('button', { name: 'Create admin account' }).click()
+    await page.getByRole('button', { name: 'Create account' }).click()
     await page.waitForURL('**/login')
     await loginWith(page, USERNAME, PASSWORD)
 
@@ -79,7 +79,7 @@ test.describe('setup and login', () => {
     await page.getByLabel('Username').fill(USERNAME)
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
     await page.getByLabel('Confirm password').fill(PASSWORD)
-    await page.getByRole('button', { name: 'Create admin account' }).click()
+    await page.getByRole('button', { name: 'Create account' }).click()
     await page.waitForURL('**/login')
 
     await page.goto('/instances')
