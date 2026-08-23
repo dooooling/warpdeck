@@ -916,7 +916,7 @@ async fn log_history_paginates_and_redacts_process_lines() {
     }
     std::fs::write(logs_dir.join("manager.log"), manager).unwrap();
 
-    // instance-0.log：进程输出行整行 scrub。
+    // instance-0.log：进程输出行按模式片段脱敏（敏感值替换、其余保留）。
     std::fs::write(
         logs_dir.join("instance-0.log"),
         "registration token abc\nwarp: connected\n",
@@ -966,7 +966,7 @@ async fn log_history_paginates_and_redacts_process_lines() {
         ]
     );
 
-    // 实例日志：整行 [REDACTED]，但行结构保留。
+    // 实例日志：敏感值片段脱敏，普通内容原样（P1 审查 R2：模式化脱敏）。
     let resp = app
         .request(Method::GET, "/api/v1/logs?source=instance:0")
         .await;
@@ -978,7 +978,10 @@ async fn log_history_paginates_and_redacts_process_lines() {
         .iter()
         .map(|l| l.as_str().unwrap())
         .collect();
-    assert_eq!(lines, vec!["[REDACTED]", "[REDACTED]"]);
+    assert_eq!(
+        lines,
+        vec!["registration token [REDACTED]", "warp: connected"]
+    );
 
     // 未知源 → 422 VALIDATION。
     let resp = app.request(Method::GET, "/api/v1/logs?source=bogus").await;

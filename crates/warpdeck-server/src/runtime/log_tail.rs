@@ -261,11 +261,11 @@ mod tests {
             LogSource::Instance(InstanceId::from_db(0).unwrap())
         );
         assert_eq!(line1.seq, 1);
-        // 进程行整行 scrub。
-        assert_eq!(line1.line, "[REDACTED]");
+        // 进程行模式化 scrub：敏感值替换、普通行保留。
+        assert_eq!(line1.line, "registration token [REDACTED]");
         let line2 = next_line(&mut rx).await.expect("second line");
         assert_eq!(line2.seq, 2);
-        assert_eq!(line2.line, "[REDACTED]");
+        assert_eq!(line2.line, "warp connected");
 
         // manager 文件：原样（结构化字段级已脱敏）。
         // 文件先于 watcher 存在（真实场景 manager.log 随进程启动即建）。
@@ -308,20 +308,20 @@ mod tests {
             .unwrap();
         let l1 = next_line(&mut rx).await.expect("line before truncate");
         assert_eq!(l1.source.id(), "instance:1");
-        assert_eq!(l1.line, "[REDACTED]");
+        assert_eq!(l1.line, "a");
 
         // 截断 → 从头重跟。
         std::fs::write(&path, "fresh start\n").unwrap();
         let l2 = next_line(&mut rx).await.expect("line after truncate");
         assert_eq!(l2.seq, 1, "seq restarts after truncate");
-        assert_eq!(l2.line, "[REDACTED]");
+        assert_eq!(l2.line, "fresh start");
 
         // 删除 → 重建 → 恢复跟随（Windows file tunneling 会继承创建时间，
         // rescue 用身份+长度双校验识别重建）。
         std::fs::remove_file(&path).unwrap();
         std::fs::write(&path, "reborn\n").unwrap();
         let l3 = next_line(&mut rx).await.expect("line after recreate");
-        assert_eq!(l3.line, "[REDACTED]");
+        assert_eq!(l3.line, "reborn");
 
         handle.abort();
     }
@@ -384,7 +384,7 @@ mod tests {
 
         let l = next_line(&mut rx).await.expect("discovered instance line");
         assert_eq!(l.source.id(), "instance:2");
-        assert_eq!(l.line, "[REDACTED]");
+        assert_eq!(l.line, "warp connected");
         assert_eq!(l.seq, 1, "boot 行在发现前已存在，只推新行");
 
         handle.abort();

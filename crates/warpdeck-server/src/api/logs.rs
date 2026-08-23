@@ -145,8 +145,11 @@ mod tests {
 
     #[test]
     fn history_redacts_non_manager_lines_only() {
-        // 策略锁定：CLI 输出整行 scrub；manager 原样。
-        assert_eq!(logs::redact_line("registration token abc"), "[REDACTED]");
+        // 模式化脱敏（P1 审查 R2）：敏感键值替换、其余内容保留。
+        assert_eq!(
+            logs::redact_line("registration token abc"),
+            "registration token [REDACTED]"
+        );
         assert_eq!(logs::redact_line(""), "");
     }
 

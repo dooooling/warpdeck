@@ -59,6 +59,70 @@ pub fn redact(value: impl AsRef<str>) -> String {
     }
 }
 
+// ---------- 模式化行级脱敏（P1 审查 R2 补充项） ----------
+//
+// 旧实现：进程来源（warp-svc/gost）的每一行都整行替换为 [REDACTED]——安全但
+// 零诊断价值（日志页全是占位符）。新实现：按模式只抹掉疑似 secret 的**片段**，
+// 其余内容原样保留，日志页恢复可用性。
+//
+// 覆盖面（按序应用，先结构化后泛化）：
+//   B. JSON 字段："secret"/"password"/"token"/"license" 等键的字符串值；
+//   A. key=value / key: value 形态的敏感键（含 gost 配置回显、CLI --flag=）；
+//   C. 孤立长 token（hex ≥40 或 base64url 形 ≥43——sha256/JWT 片段等无上下文
+//      的高熵串；普通端口/IP/延迟数字不受影响）。
+//
+// 残余风险（记录于 DESIGN §27.2）：未知格式的 secret 可能漏网；缓解 = API 面
+// （last_error 等）已改为稳定安全摘要（P0 #9），而日志文件本身仅宿主 root 可读。
+
+use std::sync::OnceLock;
+
+enum Rule {
+    Json,
+    KeyValue,
+    LongToken,
+}
+
+fn rule(rule: Rule) -> &'static regex::Regex {
+    static JSON: OnceLock<regex::Regex> = OnceLock::new();
+    static KV: OnceLock<regex::Regex> = OnceLock::new();
+    static LONG: OnceLock<regex::Regex> = OnceLock::new();
+    match rule {
+        Rule::Json => JSON.get_or_init(|| {
+            // "password": "..." —— 值整体替换。
+            regex::Regex::new(
+                r#"(?i)("(?:secret|client[_-]?secret|auth[_-]?client[_-]?secret|password|passwd|token|license|api[_-]?key|private[_-]?key)"\s*:\s*)"[^"]*""#,
+            )
+            .expect("static regex")
+        }),
+        Rule::KeyValue => KV.get_or_init(|| {
+            // password=hunter2 / token: abc / --license-key XYZ
+            regex::Regex::new(
+                r#"(?i)\b(secret|client[_-]?secret|auth[_-]?client[_-]?secret|password|passwd|token|license(?:[_-]key)?|api[_-]?key|private[_-]?key)\b(\s*[=:]\s*|\s+)([^\s",;]{1,4096})"#,
+            )
+            .expect("static regex")
+        }),
+        Rule::LongToken => LONG.get_or_init(|| {
+            regex::Regex::new(r"\b(?:[0-9a-fA-F]{40,}|[A-Za-z0-9+/_=-]{43,})\b")
+                .expect("static regex")
+        }),
+    }
+}
+
+/// 行级模式脱敏：只替换疑似 secret 的片段，保留其余诊断信息。
+///
+/// 入口约束（DESIGN §27.2）：进程来源（instance/gost）的历史读取与实时发布
+/// 都必须经本函数（`runtime::logs::redact_line` 是唯一转发点）；manager 自身
+/// 的结构化日志继续用 `Sensitive<T>` 在日志点保证。
+pub fn scrub_line(line: &str) -> String {
+    if line.is_empty() {
+        return String::new();
+    }
+    let s = rule(Rule::Json).replace_all(line, r#"$1"[REDACTED]""#);
+    let s = rule(Rule::KeyValue).replace_all(&s, "${1}${2}[REDACTED]");
+    let s = rule(Rule::LongToken).replace_all(&s, REDACTED);
+    s.into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +147,63 @@ mod tests {
     fn redact_str_replaces_non_empty() {
         assert_eq!(redact("secret"), REDACTED);
         assert_eq!(redact(""), "");
+    }
+
+    // ---------- scrub_line：模式化片段脱敏（P1 审查 R2） ----------
+
+    #[test]
+    fn plain_lines_pass_through() {
+        assert_eq!(scrub_line("warp: connected"), "warp: connected");
+        assert_eq!(
+            scrub_line("gost listening on :11080"),
+            "gost listening on :11080"
+        );
+        assert_eq!(
+            scrub_line("latency=42ms exit_ip=1.2.3.4"),
+            "latency=42ms exit_ip=1.2.3.4"
+        );
+        assert_eq!(scrub_line(""), "");
+    }
+
+    #[test]
+    fn key_value_secrets_are_masked() {
+        // gost 配置回显 / CLI --flag 形态。
+        assert_eq!(
+            scrub_line("auth: password=hunter2"),
+            "auth: password=[REDACTED]"
+        );
+        assert_eq!(
+            scrub_line("--license-key ABCD-1234 applied"),
+            "--license-key [REDACTED] applied"
+        );
+        assert_eq!(
+            scrub_line("client_secret = topsecret; done"),
+            "client_secret = [REDACTED]; done"
+        );
+    }
+
+    #[test]
+    fn json_string_values_are_masked() {
+        assert_eq!(
+            scrub_line(r#"{"auth_client_secret": "s3cr3t", "org": "acme"}"#),
+            r#"{"auth_client_secret": "[REDACTED]", "org": "acme"}"#
+        );
+    }
+
+    #[test]
+    fn long_tokens_are_masked_but_common_values_survive() {
+        // sha256/JWT 片段（hex≥40 / base64url≥43）。
+        let sha = "a".repeat(64);
+        assert_eq!(
+            scrub_line(&format!("digest {sha} ok")),
+            "digest [REDACTED] ok"
+        );
+        // JWT 片段（base64url ≥43）。
+        let jwt_part = "QmFzZTY0X1Rva2VuX1dpdGhfbG90c19vZl9DaGFyc19XaXRoX0xvdHNfT2ZfQ2hhcnM";
+        assert_eq!(scrub_line(jwt_part), REDACTED);
+
+        // 常见运维值不受影响。
+        assert_eq!(scrub_line("port 40000"), "port 40000");
+        assert_eq!(scrub_line("ip 192.168.1.100"), "ip 192.168.1.100");
     }
 }

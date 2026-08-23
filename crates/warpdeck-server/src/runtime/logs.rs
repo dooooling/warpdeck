@@ -174,8 +174,9 @@ impl LogBus {
 }
 
 /// 单条日志行经中心 redactor 过滤（历史 API 与实时发布共同入口）。
+/// 模式化片段脱敏（P1 审查 R2：整行 [REDACTED] 无诊断价值，已废弃）。
 pub fn redact_line(line: &str) -> String {
-    redactor::redact(line)
+    redactor::scrub_line(line)
 }
 
 /// 一页 tail 读取结果（行文本按文件顺序，旧→新）。
