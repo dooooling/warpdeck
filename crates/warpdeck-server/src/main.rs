@@ -3,8 +3,16 @@
 //! 启动顺序（DEVELOPMENT_PLAN §12.2 P7-008 / P6-008）：
 //! config → 日志 → DB（migration）→ 仓储 → 运行时栈（manager/health）
 //! → GOST 代理栈 → reconciler（持有 trigger + 关停信号）→ Web。
-//! 关停顺序：SIGTERM → watch 置位（reconciler 退出）→ health cancel →
-//! pool close。
+//!
+//! 关停树（P1 审查 R2#5：信号即返回，随后**有界、按依赖序**逐层关停）：
+//!   ① SIGTERM → 置位 watch 并立即结束 graceful-shutdown future
+//!     （axum 随之停止接受新请求——慢清理不得滞留在 accept 阶段）
+//!   ② 健康监控 cancel + join（先停探测，避免与实例停止竞态评估）
+//!   ③ 等 reconciler 退出（有界；不再触碰 DB/运行时）
+//!   ④ 停 GOST
+//!   ⑤ 停全部 WARP 实例并回收子进程
+//!   ⑥ 等 log tail watcher 退出（有界）
+//!   ⑦ 关闭 SQLite（最后一步）
 //!
 //! 所有组件经 trait 接缝组装：真实实现（本文件）；测试在 `app::TestApp`
 //! 注入 fake（API 测试无需真实 WARP，AGENTS.md §开发纪律）。
@@ -145,8 +153,8 @@ async fn serve(cfg: config::AppConfig) {
     ));
     let runtime: Arc<dyn WarpRuntime> = manager.clone();
 
-    // 健康监控（P4-007）：独立循环；`health_cancel` drop 时停止。
-    let (_health_handle, health_cancel) = HealthMonitor::new(
+    // 健康监控（P4-007）：独立循环；`health_cancel` 置位/drop 时停止。
+    let (health_handle, health_cancel) = HealthMonitor::new(
         manager.clone(),
         clock.clone(),
         HealthConfig::default(),
@@ -197,13 +205,13 @@ async fn serve(cfg: config::AppConfig) {
         bus.clone(),
         apply_error.clone(),
     );
-    tokio::spawn(async move {
+    let reconciler_handle = tokio::spawn(async move {
         reconciler.run().await;
     });
 
     // --- 实时日志 tail watcher（P10-007）：新行经 redactor 推 LogBus ---
-    // 句柄 drop 不 abort；任务与进程同生命周期。
-    let _tail_handles =
+    // 关停树第 ⑥ 步有界等待其退出。
+    let tail_handles =
         warpdeck_server::runtime::log_tail::spawn_tail_watchers(&cfg.data_dir, log_bus.clone());
 
     // --- Web/API（handler 只写 desired + trigger；实际状态读 registry）---
@@ -239,16 +247,35 @@ async fn serve(cfg: config::AppConfig) {
     )
     .with_graceful_shutdown(async move {
         shutdown::shutdown_signal().await;
-        tracing::info!("shutdown: signalling reconciler, stopping gost");
+        tracing::info!("shutdown: signal received; stopping request acceptance");
+        // ① 只做信号置位并立即返回——axum 随之停止接受新请求；
+        //    分层清理在 serve 返回后按依赖序执行（见模块头「关停树」）。
         let _ = shutdown_tx.send(true);
-        drop(health_cancel);
-        if let Err(e) = gost_manager.stop().await {
-            tracing::warn!(error = %e, "gost stop failed during shutdown");
-        }
     })
     .await
     .expect("server error");
 
+    // ---------- 有序关停树（P1 审查 R2#5） ----------
+    // ② 健康监控：先停探测，避免与实例停止竞态评估。
+    drop(health_cancel);
+    let _ = tokio::time::timeout(Duration::from_secs(5), health_handle).await;
+
+    // ③ reconciler：等当前轮收敛完成（有界；它持有 DB/运行时引用）。
+    let _ = tokio::time::timeout(Duration::from_secs(10), reconciler_handle).await;
+    tracing::info!("shutdown: reconciler stopped");
+
+    // ④ GOST 数据面。
+    if let Err(e) = gost_manager.stop().await {
+        tracing::warn!(error = %e, "gost stop failed during shutdown");
+    }
+
+    // ⑤ 全部 WARP 实例 + 子进程回收（单实例失败不阻塞其余）。
+    manager.stop_all().await;
+
+    // ⑥ log tail watcher（文件随实例目录消失自然退出；有界等待兜底）。
+    let _ = tokio::time::timeout(Duration::from_secs(5), tail_handles).await;
+
+    // ⑦ SQLite 最后关闭。
     pool.close().await;
     tracing::info!("database closed");
 }
