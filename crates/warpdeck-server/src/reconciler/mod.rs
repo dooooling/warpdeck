@@ -291,10 +291,14 @@ impl Reconciler {
                 // v0.2 §16.9：档案（凭据/模式）变更 → 强制重启，不做退避
                 // （新凭据即刻生效；应用失败上浮并保留标记，下轮重试）。
                 if spec.restart_pending {
-                    self.restart_instance(spec).await
-                } else {
-                    Ok(()) // 流程中/健康：不动（幂等）
+                    return self.restart_instance(spec).await;
                 }
+                // P1 审查 R2#1：显式重启命令（API 只写代数）——Reconciler 是
+                // 唯一执行者；停机期间排队的多条命令合并为最新一条。
+                if spec.restart_command_generation > spec.observed_restart_generation {
+                    return self.restart_instance(spec).await;
+                }
+                Ok(()) // 流程中/健康：不动（幂等）
             }
             Some(RuntimeState::Stopping) => Ok(()), // 停止中：等待完成
             Some(RuntimeState::Disabled) => {
@@ -313,6 +317,12 @@ impl Reconciler {
             Ok(()) => {
                 let _ = self.repo.clear_backoff(spec.id).await;
                 let _ = self.repo.clear_restart_pending(spec.id).await;
+                // P1 审查 R2#1：启动成功即视为已处理到当前命令代数
+                // （排队中的重启命令被「全新启动」满足）。
+                let _ = self
+                    .repo
+                    .acknowledge_restart(spec.id, spec.restart_command_generation)
+                    .await;
                 info!(component = "reconciler", instance = %spec.id.as_i64(), "started and healthy");
                 Ok(())
             }
@@ -324,12 +334,17 @@ impl Reconciler {
     }
 
     async fn restart_instance(&self, spec: &WarpInstanceSpec) -> Result<(), String> {
-        debug!(component = "reconciler", instance = %spec.id.as_i64(), "restarting after failure");
+        debug!(component = "reconciler", instance = %spec.id.as_i64(), "restarting after failure or explicit command");
         match self.runtime.restart(spec.id, spec.account_profile_id).await {
             Ok(()) => {
                 let _ = self.repo.clear_backoff(spec.id).await;
                 let _ = self.repo.clear_restart_pending(spec.id).await;
-                info!(component = "reconciler", instance = %spec.id.as_i64(), "restarted after failure");
+                // P1 审查 R2#1：追平命令代数（MAX 守卫防并发回退）。
+                let _ = self
+                    .repo
+                    .acknowledge_restart(spec.id, spec.restart_command_generation)
+                    .await;
+                info!(component = "reconciler", instance = %spec.id.as_i64(), "restarted after failure or explicit command");
                 Ok(())
             }
             Err(e) => {

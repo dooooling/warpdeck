@@ -55,6 +55,11 @@ pub struct WarpInstanceSpec {
     /// v0.2 档案变更标记：=1 表示档案（凭据/模式）已更新，需重启后清零
     /// （migration 0006，§16.9；由 Reconciler 收敛并清零）。
     pub restart_pending: bool,
+    /// P1 审查 R2#1（migration 0007）：显式重启命令代数——API 每次 restart +1；
+    /// Reconciler 是唯一执行者。> observed = 有待执行命令；停机期间多条排队合并。
+    pub restart_command_generation: i64,
+    /// Reconciler 已处理到的命令代数（单调追平，不回退）。
+    pub observed_restart_generation: i64,
     /// 上次失败时间（ISO8601 UTC；P6-007 backoff）。
     pub last_failure_at: Option<String>,
     /// 下次允许自动重试时间（ISO8601 UTC；None = 立即可重试）。
@@ -114,6 +119,14 @@ pub trait WarpInstanceRepository: Send + Sync {
     ) -> Result<(), RepoError>;
     /// 绑定到指定档案的实例数（§16.9：WARP+ 单实例约束的支撑查询）。
     async fn count_bound_to_profile(&self, profile_id: i64) -> Result<usize, RepoError>;
+
+    /// P1 审查 R2#1：显式重启命令——命令代数 +1（API 只写期望侧，不碰运行时）。
+    /// 返回递增后的代数值。行不存在时 0 行受影响，返回 Ok(0)（handler 已先行
+    /// 404 校验；此处幂等兜底）。
+    async fn request_restart(&self, id: InstanceId) -> Result<i64, RepoError>;
+
+    /// Reconciler 完成 start/restart 后追平命令代数。MAX 守卫：并发下不回退。
+    async fn acknowledge_restart(&self, id: InstanceId, generation: i64) -> Result<(), RepoError>;
 
     /// v0.2 §17.4 改绑（P1 审查 #5 原子版）：§16.9 WARP+ 单实例检查与写入在
     /// 同一 `BEGIN IMMEDIATE` 事务内完成。目标档案为 warp_plus 且已被其他
@@ -177,13 +190,15 @@ fn row_to_spec(row: &sqlx::sqlite::SqliteRow) -> Result<WarpInstanceSpec, RepoEr
         auto_restart: row.get::<i64, _>("auto_restart") != 0,
         account_profile_id: row.get("account_profile_id"),
         restart_pending: row.get::<i64, _>("restart_pending") != 0,
+        restart_command_generation: row.get("restart_command_generation"),
+        observed_restart_generation: row.get("observed_restart_generation"),
         last_failure_at: row.get("last_failure_at"),
         next_retry_at: row.get("next_retry_at"),
     })
 }
 
 const SPEC_COLUMNS: &str =
-    "id, name, enabled, desired_state, auto_restart, account_profile_id, restart_pending, last_failure_at, next_retry_at";
+    "id, name, enabled, desired_state, auto_restart, account_profile_id, restart_pending, restart_command_generation, observed_restart_generation, last_failure_at, next_retry_at";
 
 #[async_trait]
 impl WarpInstanceRepository for SqliteWarpInstanceRepository {
@@ -316,6 +331,28 @@ impl WarpInstanceRepository for SqliteWarpInstanceRepository {
             .fetch_one(&self.pool)
             .await?;
         Ok(row.get::<i64, _>(0) as usize)
+    }
+
+    async fn request_restart(&self, id: InstanceId) -> Result<i64, RepoError> {
+        use sqlx::Row;
+        let row = sqlx::query(
+            "UPDATE warp_instances SET restart_command_generation = restart_command_generation + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ? RETURNING restart_command_generation",
+        )
+        .bind(id.as_i64())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get::<i64, _>(0)).unwrap_or(0))
+    }
+
+    async fn acknowledge_restart(&self, id: InstanceId, generation: i64) -> Result<(), RepoError> {
+        sqlx::query(
+            "UPDATE warp_instances SET observed_restart_generation = MAX(observed_restart_generation, ?), updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?",
+        )
+        .bind(generation)
+        .bind(id.as_i64())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn rebind_profile_guarded(
@@ -731,6 +768,8 @@ mod tests {
             auto_restart: true,
             account_profile_id: None,
             restart_pending: false,
+            restart_command_generation: 0,
+            observed_restart_generation: 0,
             last_failure_at: None,
             next_retry_at: None,
         };

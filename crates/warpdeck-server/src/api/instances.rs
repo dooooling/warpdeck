@@ -244,8 +244,10 @@ pub async fn stop(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// `POST /api/v1/instances/{id}/restart`（P7-006）：运行时意图，不改变
-/// Desired State。仅对“实际在运行”（非 stopped/disabled）的实例合法。
+/// `POST /api/v1/instances/{id}/restart`（P7-006；P1 审查 R2#1 重构）：
+/// 只写期望侧的**重启命令代数**（+1）并触发收敛——Reconciler 是唯一运行时
+/// 写者，请求不再被慢生命周期操作阻塞。实际未运行的实例快速 409（读 registry，
+/// 仅 UX 快速失败，不做控制）。停机期间排队的多条命令由 Reconciler 合并。
 pub async fn restart(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
@@ -253,16 +255,9 @@ pub async fn restart(
     _user: AuthUser,
 ) -> ApiResult<StatusCode> {
     let id = parse_id(id).map_err(|e| e.into_response_with(&request_id))?;
-    let spec = state
-        .instances
-        .get(id)
+    ensure_exists(&state, id)
         .await
-        .map_err(repo_error)
-        .map_err(|e| e.into_response_with(&request_id))?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("instance {} not found", id.as_i64()))
-                .into_response_with(&request_id)
-        })?;
+        .map_err(|e| e.into_response_with(&request_id))?;
     match state.registry.get(id) {
         Some(r) if r.state.is_running() => {}
         _ => {
@@ -273,17 +268,19 @@ pub async fn restart(
         }
     }
     state
-        .runtime
-        .restart(id, spec.account_profile_id)
+        .instances
+        .request_restart(id)
         .await
-        .map_err(manager_error)
+        .map_err(repo_error)
         .map_err(|e| e.into_response_with(&request_id))?;
+    state.notify_change();
     Ok(StatusCode::ACCEPTED)
 }
 
-/// `DELETE /api/v1/instances/{id}`（P7-007）：危险操作。
-/// 顺序：若实际存在运行记录 → 先 runtime.delete（停止进程、保留注册），
-/// 成功后删除期望行；任何一步失败都不删行（客户端可重试）。
+/// `DELETE /api/v1/instances/{id}`（P7-007；P1 审查 R2#1 重构）：危险操作。
+/// 只删期望行 + 触发收敛：运行中实例由 Reconciler 的孤儿收敛逻辑停止
+/// （消除旧「先停进程后删行」窗口里被复活/竞态的可能）。202 = 已受理。
+/// 不提供 `preserve_registration` 参数：MVP 取最安全默认（保留注册数据）。
 pub async fn delete(
     State(state): State<ApiState>,
     Path(id): Path<i64>,
@@ -294,14 +291,6 @@ pub async fn delete(
     ensure_exists(&state, id)
         .await
         .map_err(|e| e.into_response_with(&request_id))?;
-    if state.registry.get(id).is_some() {
-        state
-            .runtime
-            .delete(id, false)
-            .await
-            .map_err(manager_error)
-            .map_err(|e| e.into_response_with(&request_id))?;
-    }
     state
         .instances
         .delete(id)
@@ -309,7 +298,7 @@ pub async fn delete(
         .map_err(repo_error)
         .map_err(|e| e.into_response_with(&request_id))?;
     state.notify_change();
-    Ok(StatusCode::NO_CONTENT)
+    Ok(StatusCode::ACCEPTED)
 }
 
 fn parse_id(id: i64) -> Result<crate::runtime::instance::InstanceId, ApiError> {
@@ -328,22 +317,4 @@ async fn ensure_exists(
         )));
     }
     Ok(())
-}
-
-fn manager_error(e: crate::runtime::manager::ManagerError) -> ApiError {
-    use crate::runtime::manager::ManagerError;
-    match e {
-        ManagerError::NotRunning(id) => {
-            ApiError::Conflict(format!("instance {} is not running", id.as_i64()))
-        }
-        ManagerError::AlreadyRunning(id) => {
-            ApiError::Conflict(format!("instance {} is already running", id.as_i64()))
-        }
-        ManagerError::PortInUse(id, port) => ApiError::Conflict(format!(
-            "instance {} internal port {} is already in use",
-            id.as_i64(),
-            port
-        )),
-        other => ApiError::Internal(other.to_string()),
-    }
 }
