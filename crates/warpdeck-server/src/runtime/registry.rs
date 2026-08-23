@@ -175,10 +175,12 @@ impl RuntimeRegistry {
         });
     }
 
-    /// start 完整成功：进入 Healthy、记录进程 PID、递增启动计数、清零计数。
+    /// 进程/控制面就绪（P1 审查 R1#12）：记录 PID、递增启动计数、清零计数，
+    /// 但状态**保持 Starting**——Healthy 必须经真实数据面探测验证后由 manager
+    /// 显式置位（AGENTS.md「Healthy ≠ PID alive」基线）。
     pub fn on_started(&self, id: InstanceId, warp_pid: u32, dbus_pid: u32) {
         self.update(id, |e| {
-            e.state = RuntimeState::Healthy;
+            e.state = RuntimeState::Starting;
             e.warp_pid = Some(warp_pid);
             e.dbus_pid = Some(dbus_pid);
             e.restart_count = e.restart_count.saturating_add(1);
@@ -274,7 +276,9 @@ mod tests {
 
         reg.on_started(id(4), 102, 101);
         let e = reg.get(id(4)).unwrap();
-        assert_eq!(e.state, RuntimeState::Healthy);
+        // P1 审查 R1#12：on_started 保持 Starting（Healthy 由 manager 在
+        // 数据面验证通过后显式置位）。
+        assert_eq!(e.state, RuntimeState::Starting);
         assert_eq!(e.restart_count, 1);
         assert_eq!(e.consecutive_failures, 0);
         assert!(e.last_error.is_none());

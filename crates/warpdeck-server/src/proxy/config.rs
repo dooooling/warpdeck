@@ -39,6 +39,27 @@ pub struct ProxyNode {
     pub addr: String,
 }
 
+/// YAML 双引号标量转义（P1 审查 R1#8）：凭据渲染进 GOST 配置的唯一安全形态。
+/// 处理 `"` `\` 与控制字符（含换行——上游虽已拒绝，此处纵深防御），
+/// 防止 `#` 行内注释、前导 `*/&/!` 等截断或误解裸标量。
+fn yaml_double_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// 代理认证（P5-008）。明文仅存在于配置写入瞬间与内存中；
 /// HTTP API 侧由 P7/P8 加密存储，GET 永不回显。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,9 +242,12 @@ impl GostConfig {
         }
         if let Some(a) = &self.auth {
             out.push_str("authers:\n- name: auther-0\n  auths:\n");
+            // P1 审查 R1#8：凭据必须双引号转义——裸标量遇 `#`（行内注释）、
+            // 前导 `*/&/!` 等会被截断或误解，破坏 auther 结构。
             out.push_str(&format!(
                 "  - username: {}\n    password: {}\n",
-                a.username, a.password
+                yaml_double_quoted(&a.username),
+                yaml_double_quoted(&a.password)
             ));
         }
         if !self.allowlist.is_empty() {
@@ -382,7 +406,7 @@ chains:
 
         assert!(yaml.contains("handler:\n    type: auto\n    auther: auther-0\n"));
         assert!(yaml.contains(
-            "authers:\n- name: auther-0\n  auths:\n  - username: alice\n    password: s3cret\n"
+            "authers:\n- name: auther-0\n  auths:\n  - username: \"alice\"\n    password: \"s3cret\"\n"
         ));
         assert!(yaml.contains("admission: allowlist-0"));
         assert!(yaml.contains("admissions:\n- name: allowlist-0\n  whitelist: true\n  matchers:\n  - 192.168.0.0/16\n  - 127.0.0.1\n"));
@@ -404,6 +428,44 @@ chains:
         assert!(yaml.contains("name: no-upstream"));
         assert!(yaml.contains("addr: \"127.0.0.1:1\""));
         assert!(!yaml.contains("name: warp-"));
+    }
+
+    /// P1 审查 R1#8：含 `#` / 前导特殊字符 / 引号 / 反斜杠的凭据必须被双引号
+    /// 转义，渲染结果仍是结构合法的单值标量（不被截断、不注入新键）。
+    /// （换行凭据在 `new()` 即被拒绝——此处覆盖的是其余危险字符。）
+    #[test]
+    fn auth_credentials_are_yaml_escaped() {
+        let cfg = GostConfig::new(
+            true,
+            false,
+            Some(ProxyAuth {
+                username: "user#1".into(),
+                password: "\"pass word\" \\ x\ty".into(),
+            }),
+            &[],
+            None,
+            None,
+            vec![node(1)],
+        )
+        .unwrap();
+        let yaml = cfg.render();
+
+        // `#` 后不再可能成为行内注释；引号/反斜杠转义；制表符折叠为 \t 字面量。
+        assert!(yaml.contains(r#"username: "user#1""#));
+        assert!(yaml.contains(r#"password: "\"pass word\" \\ x\ty""#));
+        // 单行结构不被破坏（authers 段内不得出现第二个 username 键）。
+        assert_eq!(yaml.matches("username:").count(), 1);
+    }
+
+    #[test]
+    fn yaml_double_quoted_handles_control_chars() {
+        assert_eq!(yaml_double_quoted("plain"), "\"plain\"");
+        assert_eq!(yaml_double_quoted("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        assert_eq!(
+            yaml_double_quoted("l\nin\ter"),
+            "\"l\\nin\\ter\"",
+            "换行/制表符折叠为字面转义（纵深防御；上游已拒绝换行凭据）"
+        );
     }
 
     #[test]

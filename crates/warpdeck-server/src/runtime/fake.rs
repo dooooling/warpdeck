@@ -128,6 +128,9 @@ impl WarpRuntime for FakeWarpRuntime {
         }
         inner.started.push(ctx.id.as_i64());
         self.registry.on_started(ctx.id, 4242, 4343);
+        // fake 语义 = 「start 全程成功（含数据面验证）」：与真实 manager 的
+        // 最终态一致（P1 审查 R1#12：on_started 本身只到 Starting）。
+        self.registry.set_state(ctx.id, RuntimeState::Healthy);
         Ok(())
     }
 
@@ -157,6 +160,7 @@ impl WarpRuntime for FakeWarpRuntime {
             ));
         }
         self.registry.on_started(id, 4242, 4343);
+        self.registry.set_state(id, RuntimeState::Healthy);
         Ok(())
     }
 
