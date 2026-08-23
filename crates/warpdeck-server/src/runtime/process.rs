@@ -451,7 +451,11 @@ mod tests {
             // 与「是否覆盖」正交。
             // P1 审查 R3#7：输出经行级脱敏泵落盘——无换行的三段在 EOF 时合并为
             // 一行并补写 \n，故总长 900+1；三段内容必须完整（防覆盖语义不变）。
-            assert_eq!(content.len(), 901, "总字节数（防覆盖，含补写换行）: {content}");
+            assert_eq!(
+                content.len(),
+                901,
+                "总字节数（防覆盖，含补写换行）: {content}"
+            );
             assert!(content.contains(&"a".repeat(300)), "stdout 首段: {content}");
             assert!(
                 content.contains(&"b".repeat(300)),
