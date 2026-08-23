@@ -300,6 +300,7 @@ impl TestApp {
             data_dir_path.clone(),
             Arc::new(Notify::new()),
             env!("CARGO_PKG_VERSION").to_string(),
+            Arc::new(crate::db::uow::ConsistencyService::new(pool.clone(), key)),
             gost.clone(),
             crate::reconciler::new_apply_error_slot(),
         );

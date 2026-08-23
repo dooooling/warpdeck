@@ -15,7 +15,7 @@ use crate::api::dto::{AccountProfileView, AccountProfileWriteRequest};
 use crate::api::error::{invalid_json_body, repo_error, ApiError};
 use crate::api::middleware::AuthUser;
 use crate::api::{ApiResult, ApiState};
-use crate::crypto::secret_store::{SecretKind, SecretStoreError};
+use crate::crypto::secret_store::SecretKind;
 use crate::db::account::AccountMode;
 use crate::db::profiles::{AccountProfile, AccountProfileError};
 use crate::observability::RequestId;
@@ -90,32 +90,33 @@ pub async fn create(
         .map_err(ApiError::Validation)
         .map_err(|e| e.into_response_with(&request_id))?;
 
+    // 落盘：**档案行 + 全部凭据同一事务**（P1 审查 R3#4）——
+    // 旧实现先建行再写 secret、失败后补偿删除且补偿本身可能吞错。
+    let creds = [
+        ("license", SecretKind::WarpPlusLicense, req.license.clone()),
+        (
+            "client_id",
+            SecretKind::ZeroTrustClientId,
+            req.client_id.clone(),
+        ),
+        (
+            "client_secret",
+            SecretKind::ZeroTrustClientSecret,
+            req.client_secret.clone(),
+        ),
+    ];
+    let new_id = state
+        .consistency
+        .create_profile_with_credentials(&name, mode.as_str(), org.as_deref(), creds)
+        .await
+        .map_err(consistency_error)
+        .map_err(|e| e.into_response_with(&request_id))?;
     let profile = state
         .profiles
-        .create(&name, mode, org.as_deref())
+        .get(new_id)
         .await
         .map_err(profile_error)
         .map_err(|e| e.into_response_with(&request_id))?;
-
-    // 凭据落库（校验已通过；失败上浮并删除档案保持一致性）。
-    // P1 审查 R1#10：补偿删除自身失败时**不得吞错**——孤儿档案（无凭据）会让
-    // 管理员误以为创建成功；显式 500 指明残留 id，便于人工清理。
-    if let Err(e) = write_credentials(&state, profile.id, &req).await {
-        if let Err(del_err) = state.profiles.delete(profile.id).await {
-            tracing::error!(
-                component = "api",
-                profile_id = profile.id,
-                error = %del_err,
-                "credential write failed AND compensating profile delete failed; orphan profile left behind"
-            );
-            return Err(ApiError::Internal(format!(
-                "credentials failed ({e}) and cleanup also failed; orphan profile {} remains and must be deleted manually",
-                profile.id
-            ))
-            .into_response_with(&request_id));
-        }
-        return Err(secret_error(e).into_response_with(&request_id));
-    }
 
     let view = build_view(&state, &profile).await;
     Ok((StatusCode::CREATED, Json(view)))
@@ -213,38 +214,36 @@ pub async fn update(
         .map_err(ApiError::Validation)
         .map_err(|e| e.into_response_with(&request_id))?;
 
-    // 校验通过后落盘：secret → profile（mode/org 变更在 update 内标记重启）。
-    write_credentials(&state, id, &req)
+    // 校验通过后落盘：**profile 元数据 + 三个 secret + 重启标记同一事务**
+    // （P1 审查 R3#4：杜绝部分成功的混合凭据态；标记失败不再可能静默，
+    // 因为它就在事务里——失败即整体回滚并返回 500）。
+    let creds = [
+        ("license", SecretKind::WarpPlusLicense, req.license.clone()),
+        (
+            "client_id",
+            SecretKind::ZeroTrustClientId,
+            req.client_id.clone(),
+        ),
+        (
+            "client_secret",
+            SecretKind::ZeroTrustClientSecret,
+            req.client_secret.clone(),
+        ),
+    ];
+    state
+        .consistency
+        .update_profile_with_credentials(id, &name, mode.as_str(), org.as_deref(), creds)
         .await
-        .map_err(secret_error)
+        .map_err(consistency_error)
         .map_err(|e| e.into_response_with(&request_id))?;
-    let runtime_relevant = before.mode != mode
-        || before.zero_trust_org != org
-        || req.license.is_some()
-        || req.client_id.is_some()
-        || req.client_secret.is_some();
+    state.notify_change();
+
     let updated = state
         .profiles
-        .update(id, &name, mode, org.as_deref())
+        .get(id)
         .await
         .map_err(profile_error)
         .map_err(|e| e.into_response_with(&request_id))?;
-    // secret 变更不经过 profiles.update 的 mark 逻辑，这里补上；
-    // mode/org 变更已被 update 标记（幂等，重复置 1 无副作用）。
-    // P1 审查 R1#10：标记失败**不得静默**——否则凭据轮换对运行中实例不生效
-    // 且无人知晓（安全相关的陈旧凭据）。记 error 级日志；数据本身已一致。
-    if runtime_relevant {
-        if let Err(e) = state.instances.mark_restart_pending_by_profile(id).await {
-            tracing::error!(
-                component = "api",
-                profile_id = id,
-                error = %e,
-                "credentials updated but marking bound instances restart_pending failed; instances keep OLD credentials until manual restart"
-            );
-        }
-        state.notify_change();
-    }
-
     Ok(Json(build_view(&state, &updated).await))
 }
 
@@ -317,42 +316,6 @@ fn secret_would_present(value: &Option<String>, current: bool) -> bool {
 }
 
 /// 档案级 secret 写入：None = 保持；Some("") = 清除；Some(v) = 设置/轮换。
-async fn write_credentials(
-    state: &ApiState,
-    profile_id: i64,
-    req: &AccountProfileWriteRequest,
-) -> Result<(), SecretStoreError> {
-    apply_profile_secret(state, profile_id, SecretKind::WarpPlusLicense, &req.license).await?;
-    apply_profile_secret(
-        state,
-        profile_id,
-        SecretKind::ZeroTrustClientId,
-        &req.client_id,
-    )
-    .await?;
-    apply_profile_secret(
-        state,
-        profile_id,
-        SecretKind::ZeroTrustClientSecret,
-        &req.client_secret,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn apply_profile_secret(
-    state: &ApiState,
-    profile_id: i64,
-    kind: SecretKind,
-    value: &Option<String>,
-) -> Result<(), SecretStoreError> {
-    match value {
-        None => Ok(()),
-        Some(v) if v.is_empty() => state.secrets.delete_for_profile(kind, profile_id).await,
-        Some(v) => state.secrets.set_for_profile(kind, profile_id, v).await,
-    }
-}
-
 async fn exists_profile(state: &ApiState, kind: SecretKind, profile_id: i64) -> bool {
     state
         .secrets
@@ -390,6 +353,12 @@ fn profile_error(e: AccountProfileError) -> ApiError {
     }
 }
 
-fn secret_error(e: SecretStoreError) -> ApiError {
-    ApiError::Internal(e.to_string())
+fn consistency_error(e: crate::db::uow::ConsistencyError) -> ApiError {
+    use crate::db::uow::ConsistencyError as E;
+    match &e {
+        E::FreeProfileConflict => {
+            ApiError::Conflict("free profile is unique and reserved".to_string())
+        }
+        _ => ApiError::Internal(e.to_string()),
+    }
 }

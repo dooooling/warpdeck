@@ -87,29 +87,14 @@ pub async fn update(
         .into_response_with(&request_id));
     }
 
-    // 校验通过后才写密码与配置。
-    if let Some(v) = &req.password {
-        if v.is_empty() {
-            state
-                .secrets
-                .delete(SecretKind::ProxyPassword)
-                .await
-                .map_err(secret_error)
-                .map_err(|e| e.into_response_with(&request_id))?;
-        } else {
-            state
-                .secrets
-                .set(SecretKind::ProxyPassword, v)
-                .await
-                .map_err(secret_error)
-                .map_err(|e| e.into_response_with(&request_id))?;
-        }
-    }
+    // 校验通过后：**密码与配置行同一事务生效**（P1 审查 R3#4）——
+    // 旧实现先写 secret 再更新配置，中途失败会留下「密码已换/配置仍旧」。
+    let password_for_tx = req.password.as_deref();
     state
-        .proxy
-        .update(&updated)
+        .consistency
+        .update_proxy_with_password(&updated, password_for_tx)
         .await
-        .map_err(repo_error)
+        .map_err(consistency_error)
         .map_err(|e| e.into_response_with(&request_id))?;
     state.notify_change();
     // P1 审查 #3：PUT 返回的视图同样携带 GOST 实际状态——apply 尚未发生时
@@ -122,6 +107,10 @@ pub async fn update(
     Ok(Json(
         ProxyConfigView::from_config(&updated, password_present).with_actual(actual),
     ))
+}
+
+fn consistency_error(e: crate::db::uow::ConsistencyError) -> ApiError {
+    ApiError::Internal(e.to_string())
 }
 
 fn secret_error(e: crate::crypto::secret_store::SecretStoreError) -> ApiError {

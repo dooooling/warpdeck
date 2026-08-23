@@ -202,16 +202,156 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
             .any(|l| l.trim_start_matches("./") == required);
         ensure!(found, "archive missing '{required}' - aborting restore");
     }
+    // P1 审查 R3#8：路径穿越守卫——任何 `..` 段或绝对路径条目直接拒绝。
+    for entry in listing.lines() {
+        let e = entry.trim_start_matches("./");
+        ensure!(
+            !e.split('/').any(|seg| seg == "..") && !entry.starts_with('/'),
+            "archive contains unsafe path entry '{entry}' - aborting"
+        );
+    }
+
     println!("== restore {} -> {vol} ==", abs.display());
     expect_volume(&vol)?;
+
+    // P1 审查 R3#8：**staging 流程**——先解包到临时卷并完成完整性校验，
+    // 全部通过后才切换；旧数据先快照到 backup_dir 作为可回滚副本。
+    let staging_vol = format!("{vol}-restore-staging");
+    let _ = common::run(
+        "docker",
+        [
+            "volume".to_string(),
+            "rm".to_string(),
+            "-f".into(),
+            staging_vol.clone(),
+        ]
+        .as_slice(),
+    );
+    common::run(
+        "docker",
+        &[
+            "volume".to_string(),
+            "create".to_string(),
+            staging_vol.clone(),
+        ],
+    )?;
+
     compose("stop", &args.project)?;
-    let res = (|| -> Result<()> {
-        // 常量脚本（含 glob），无用户输入，允许 sh -c。
+    let result = (|| -> Result<()> {
+        // ① 解包到 staging。
+        alpine_tar(&staging_vol, &dir, &["xzf", &in_backup, "-C", "/data"])?;
+        // ② symlink/硬链接拒绝（防逃逸）。
+        let links = common::capture(
+            "docker",
+            &[
+                "run".into(),
+                "--rm".into(),
+                "-v".into(),
+                format!("{staging_vol}:/data"),
+                "alpine:3.20".into(),
+                "find".into(),
+                "/data".into(),
+                r"( -type l -o -type f )".into(),
+                "-exec".into(),
+                "test".into(),
+                "!".into(),
+                "{}".into(),
+                ";".into(),
+                "-print".into(),
+            ],
+        )?;
+        ensure!(
+            links.trim().is_empty(),
+            "archive contains symlink/hardlink entries - refusing"
+        );
+        // ③ SQLite 完整性校验。
+        let integrity = common::capture(
+            "docker",
+            &[
+                "run".into(),
+                "--rm".into(),
+                "-v".into(),
+                format!("{staging_vol}:/data"),
+                "alpine:3.20".into(),
+                "sh".into(),
+                "-c".into(),
+                "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/warpdeck.db 'PRAGMA integrity_check;'".to_string(),
+            ],
+        )?;
+        ensure!(
+            integrity.trim() == "ok",
+            "sqlite integrity_check failed: {integrity}"
+        );
+        // ④ master.key 可解码为 32 字节（与 load_or_create 约定一致）。
+        let key_len = common::capture(
+            "docker",
+            &[
+                "run".into(),
+                "--rm".into(),
+                "-v".into(),
+                format!("{staging_vol}:/data"),
+                "alpine:3.20".into(),
+                "sh".into(),
+                "-c".into(),
+                "base64 -d /data/master.key | wc -c".to_string(),
+            ],
+        )?;
+        ensure!(
+            key_len.trim() == "32",
+            "master.key is not a base64-encoded 32-byte key (got {key_len} bytes)"
+        );
+
+        // ⑤ 回滚副本：当前 live 数据打包回 backup_dir。
+        let rollback = format!("pre-restore-{}", stamp());
+        alpine_tar_capture(
+            &vol,
+            &dir,
+            &[
+                "czf",
+                &format!("/backup/{rollback}.tar.gz"),
+                "-C",
+                "/data",
+                ".",
+            ],
+        )?;
+        println!(
+            "  rollback snapshot: {}",
+            dir.join(format!("{rollback}.tar.gz")).display()
+        );
+
+        // ⑥ 切换：清空 live → 从 staging 复制。
         alpine(&vol, &dir, "rm -rf /data/* /data/.[!.]*")?;
-        alpine_tar(&vol, &dir, &["xzf", &in_backup, "-C", "/data"])
+        common::run(
+            "docker",
+            &[
+                "run".into(),
+                "--rm".into(),
+                "-v".into(),
+                format!("{staging_vol}:/src"),
+                "-v".into(),
+                format!("{vol}:/dst"),
+                "alpine:3.20".into(),
+                "sh".into(),
+                "-c".into(),
+                "cp -a /src/. /dst/".into(),
+            ],
+        )?;
+        Ok(())
     })();
+
+    // 无论成败都清理 staging 卷，然后恢复服务。
+    let _ = common::run(
+        "docker",
+        [
+            "volume".to_string(),
+            "rm".to_string(),
+            "-f".into(),
+            staging_vol,
+        ]
+        .as_slice(),
+    );
     compose("start", &args.project)?;
-    res?;
+    result?;
     println!("OK: restored {name} ({vol}), containers started");
     Ok(())
 }
