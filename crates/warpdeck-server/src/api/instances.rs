@@ -1,12 +1,13 @@
 //! 实例 CRUD 与动作端点（P7-004/005/006/007）。
 //!
 //! 语义（DESIGN §12.1 / AGENTS.md「HTTP handlers only mutate desired state
-//! and notify」）：
+//! and notify」；P1 审查 R2#1/R4 起与实现完全一致）：
 //! - start/stop = 期望状态变更 + 触发 reconciler（幂等，不直接碰进程）；
-//! - restart = 运行时意图（WarpRuntime::restart），不改变最终 Desired State
-//!   （DEVELOPMENT_PLAN §12.2 P7-006）；
-//! - delete = 危险操作：先停止进程（runtime.delete，保留注册数据），再删期望行。
-//!   不提供 `preserve_registration` 参数：MVP 取最安全默认（保留注册，P7-007）。
+//! - restart = 写入重启命令代数（+1）+ 触发收敛，202 受理——Reconciler 是
+//!   唯一执行者（migration 0007）；
+//! - delete = 删除期望行 + 触发收敛，202 受理——运行中实例由孤儿收敛停止，
+//!   API 不直接碰进程。不提供 `preserve_registration` 参数：MVP 取最安全
+//!   默认（保留注册，P7-007）。
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;

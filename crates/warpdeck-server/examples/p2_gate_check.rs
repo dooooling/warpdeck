@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     let clock = Arc::new(SystemClock);
 
     // 1. 每实例独立 D-Bus（P2-005）。
-    let dbus = DbusRuntime::start(&spawner, &ctx)
+    let mut dbus = DbusRuntime::start(&spawner, &ctx)
         .await
         .context("dbus-daemon start failed")?;
     println!("gate: dbus ok pid={}", dbus.pid());
@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
         Duration::from_millis(100),
     );
     let outcome = stop
-        .stop(&ctx, &mut svc, dbus)
+        .stop(&ctx, &mut svc, &mut dbus)
         .await
         .context("graceful stop failed")?;
     println!(

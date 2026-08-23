@@ -393,18 +393,25 @@ impl Reconciler {
         let now_iso = self.clock.now_utc_rfc3339();
 
         // 由存的 last/next 间距推导当前间隔（档位递推，无需额外计数器）。
-        let gap = match self.repo.get(id).await {
+        // P1 审查 R4：首次失败 = base（与文档一致）；之后 ×2 递推。
+        let (had_prior, gap) = match self.repo.get(id).await {
             Ok(Some(spec)) => {
                 let last = spec.last_failure_at.as_deref().and_then(parse_rfc3339_opt);
                 let next = spec.next_retry_at.as_deref().and_then(parse_rfc3339_opt);
                 match (last, next) {
-                    (Some(l), Some(n)) if n > l => (n - l).unsigned_abs().max(self.backoff_base),
-                    _ => self.backoff_base,
+                    (Some(l), Some(n)) if n > l => {
+                        (true, (n - l).unsigned_abs().max(self.backoff_base))
+                    }
+                    _ => (false, self.backoff_base),
                 }
             }
-            _ => self.backoff_base,
+            _ => (false, self.backoff_base),
         };
-        let next_gap = gap.saturating_mul(2).min(self.backoff_max);
+        let next_gap = if had_prior {
+            gap.saturating_mul(2).min(self.backoff_max)
+        } else {
+            self.backoff_base
+        };
         let due = parse_rfc3339(&now_iso)
             .map(|t| t + next_gap)
             .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);

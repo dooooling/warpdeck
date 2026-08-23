@@ -130,12 +130,16 @@ type WatcherOutcome = (Option<CrashEvent>, WarpService);
 /// 进程句柄（svc）不在此表中：start 完成后移交给 crash watcher 任务独占
 /// （watcher 需要调用 `try_wait`），任务结束后随返回值归还，由 stop/restart/
 /// delete 回收。`dbus` 留在表中供 GracefulStop 第 5 步使用。
+///
+/// P1 审查 R4#2：三个句柄字段全部 Option 化——do_stop 逐个 take 消费，
+/// **失败路径把已取出的放回**（或保持未取出），使 RunningInstance 可整体
+/// 放回 `runs` 表等待下轮重试，杜绝「句柄丢失 → 子进程永久失控」。
 struct RunningInstance {
     ctx: InstanceContext,
-    dbus: DbusRuntime,
+    dbus: Option<DbusRuntime>,
     /// drop = 取消 watcher（受控停止，避免把受控退出误报为崩溃）。
-    watcher_cancel: tokio::sync::watch::Sender<()>,
-    watcher_task: JoinHandle<WatcherOutcome>,
+    watcher_cancel: Option<tokio::sync::watch::Sender<()>>,
+    watcher_task: Option<JoinHandle<WatcherOutcome>>,
 }
 
 /// 实例管理器（DESIGN §11）：多实例生命周期编排的唯一入口。
@@ -264,7 +268,7 @@ impl InstanceManager {
         }
 
         // 先 D-Bus 后 warp-svc（warp-svc 依赖 DBUS_SYSTEM_BUS_ADDRESS socket）。
-        let dbus = match DbusRuntime::start(self.spawner.as_ref(), ctx).await {
+        let mut dbus = match DbusRuntime::start(self.spawner.as_ref(), ctx).await {
             Ok(dbus) => dbus,
             Err(e) => {
                 let msg = format!("dbus-daemon start failed: {e}");
@@ -295,7 +299,7 @@ impl InstanceManager {
         let r = probe.probe(ctx).await;
         if !r.ready {
             // 进程已起但控制面未就绪：完整清理再返回（无 orphan）。
-            let _ = self.graceful_stop.stop(ctx, &mut svc, dbus).await;
+            let _ = self.graceful_stop.stop(ctx, &mut svc, &mut dbus).await;
             let msg = format!(
                 "control plane not ready after {} attempts: {:?}",
                 r.attempts, r.last_error
@@ -309,7 +313,7 @@ impl InstanceManager {
         // 走完整清理路径并上浮，绝不伪装成功。
         if let Err(e) = self.flow.run(ctx, &credentials).await {
             // 流程失败：warp-svc/dbus 均已运行，必须完整清理再返回（无 orphan）。
-            let _ = self.graceful_stop.stop(ctx, &mut svc, dbus).await;
+            let _ = self.graceful_stop.stop(ctx, &mut svc, &mut dbus).await;
             let msg = format!("{e:?}");
             self.fail_start(ctx.id, RuntimeState::Starting, msg.clone());
             return Err(ManagerError::StartFailed(ctx.id, msg));
@@ -404,9 +408,9 @@ impl InstanceManager {
         );
         Ok(RunningInstance {
             ctx: ctx.clone(),
-            dbus,
-            watcher_cancel: cancel_tx,
-            watcher_task,
+            dbus: Some(dbus),
+            watcher_cancel: Some(cancel_tx),
+            watcher_task: Some(watcher_task),
         })
     }
 
@@ -466,7 +470,7 @@ impl InstanceManager {
     async fn do_stop(
         &self,
         ctx: &InstanceContext,
-        running: RunningInstance,
+        running: &mut RunningInstance,
     ) -> Result<StopOutcome, ManagerError> {
         // 迁移起点：崩溃场景下可能是 Failed，不是 Healthy。
         let from = self
@@ -477,11 +481,25 @@ impl InstanceManager {
         self.registry.set_state(ctx.id, RuntimeState::Stopping);
         self.publish_transition(ctx.id, from, RuntimeState::Stopping, "stop");
 
-        drop(running.watcher_cancel);
-        let (event, mut svc) = running
-            .watcher_task
-            .await
-            .map_err(|e| ManagerError::WatcherFailed(ctx.id, e.to_string()))?;
+        // P1 审查 R4#2：句柄逐个 take 消费；任一步失败，已取出的放回
+        // `running`（调用方随后把整个条目放回 runs 表），保证可重试。
+        if let Some(cancel) = running.watcher_cancel.take() {
+            drop(cancel);
+        }
+        let watcher_task = running.watcher_task.take().ok_or_else(|| {
+            ManagerError::StopFailed(ctx.id, "watcher task already consumed".into())
+        })?;
+        let (event, mut svc) = match watcher_task.await {
+            Ok(outcome) => outcome,
+            Err(join_err) => {
+                // watcher panic/abort：svc 无法归还（已随任务消失）。
+                // 极端场景仅出现在 shutdown abort；此处按失败处理。
+                return Err(ManagerError::StopFailed(
+                    ctx.id,
+                    format!("watcher task join failed: {join_err}"),
+                ));
+            }
+        };
         if event.is_some() {
             tracing::info!(
                 component = "manager",
@@ -492,7 +510,7 @@ impl InstanceManager {
 
         let outcome = self
             .graceful_stop
-            .stop(ctx, &mut svc, running.dbus)
+            .stop(ctx, &mut svc, running.dbus.as_mut().expect("dbus present"))
             .await
             .map_err(|e| ManagerError::StopFailed(ctx.id, e.to_string()))?;
 
@@ -788,7 +806,7 @@ impl WarpRuntime for InstanceManager {
 
     async fn stop(&self, id: InstanceId) -> Result<StopOutcome, ManagerError> {
         let mut runs = self.runs.lock().await;
-        let Some(running) = runs.remove(&id) else {
+        let Some(mut running) = runs.remove(&id) else {
             // 幂等：未运行也收敛为 Stopped（多次 stop 安全，可清扫 Failed 残留）。
             tracing::info!(component = "manager", instance_id = %id, "stop on non-running instance (idempotent)");
             let from = self.registry.get(id).map(|e| e.state);
@@ -802,8 +820,16 @@ impl WarpRuntime for InstanceManager {
             });
         };
         let ctx = running.ctx.clone();
-        let outcome = self.do_stop(&ctx, running).await?;
-        // P1 审查 R2#1：停止成功 → 移除代数登记，迟到崩溃事件不再生效。
+        // P1 审查 R4#2：do_stop 失败 → 条目**放回 runs**，句柄完整保留，
+        // 下轮孤儿收敛/用户重试可再次执行真正的清理。
+        let outcome = match self.do_stop(&ctx, &mut running).await {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                runs.insert(id, running);
+                return Err(e);
+            }
+        };
+        // 停止成功 → 移除代数登记，迟到崩溃事件不再生效。
         self.current_run
             .lock()
             .expect("current_run lock poisoned")
@@ -818,9 +844,12 @@ impl WarpRuntime for InstanceManager {
     ) -> Result<(), ManagerError> {
         let mut runs = self.runs.lock().await;
         let ctx = match runs.remove(&id) {
-            Some(running) => {
+            Some(mut running) => {
                 let ctx = running.ctx.clone();
-                self.do_stop(&ctx, running).await?;
+                // R4#2：失败 → 句柄放回，保留可重试性。
+                self.do_stop(&ctx, &mut running).await.inspect_err(|_| {
+                    runs.insert(id, running);
+                })?;
                 ctx
             }
             // 已停止（如 Gate 步骤 stop → restart）但保留 record：直接重新启动。
@@ -845,9 +874,12 @@ impl WarpRuntime for InstanceManager {
     async fn delete(&self, id: InstanceId, remove_registration: bool) -> Result<(), ManagerError> {
         let mut runs = self.runs.lock().await;
         let ctx = match runs.remove(&id) {
-            Some(running) => {
+            Some(mut running) => {
                 let ctx = running.ctx.clone();
-                self.do_stop(&ctx, running).await?;
+                // R4#2：失败 → 句柄放回，保留可重试性。
+                self.do_stop(&ctx, &mut running).await.inspect_err(|_| {
+                    runs.insert(id, running);
+                })?;
                 ctx
             }
             // 从未运行 / 已停止：直接构造上下文处理注册数据。

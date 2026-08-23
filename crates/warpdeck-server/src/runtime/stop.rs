@@ -77,7 +77,7 @@ impl GracefulStop {
         &self,
         ctx: &InstanceContext,
         svc: &mut WarpService,
-        dbus: DbusRuntime,
+        dbus: &mut DbusRuntime,
     ) -> Result<StopOutcome, StopError> {
         // 1. disconnect if possible（失败不阻塞）。
         let _ = self.control.disconnect(ctx).await;
@@ -159,7 +159,7 @@ mod tests {
     async fn graceful_exit_without_force_kill() {
         let (spawner, control, ctx, dir) = setup().await;
         let mut svc = WarpService::start(&spawner, &ctx).await.unwrap();
-        let dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
+        let mut dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
         let warp_pid = svc.pid();
         let dbus_pid = dbus.pid();
         // warp-svc 收到 SIGTERM 后自行优雅退出。
@@ -168,7 +168,7 @@ mod tests {
         let clock = Arc::new(ManualClock::new());
 
         let outcome = stop(Arc::new(control), clock.clone())
-            .stop(&ctx, &mut svc, dbus)
+            .stop(&ctx, &mut svc, &mut dbus)
             .await
             .unwrap();
 
@@ -194,13 +194,13 @@ mod tests {
     async fn force_kill_when_grace_expires() {
         let (spawner, control, ctx, dir) = setup().await;
         let mut svc = WarpService::start(&spawner, &ctx).await.unwrap();
-        let dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
+        let mut dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
         let warp_pid = svc.pid();
         // 不注入优雅退出：SIGTERM 后仍存活。
         let clock = Arc::new(ManualClock::new());
 
         let outcome = stop(Arc::new(control), clock.clone())
-            .stop(&ctx, &mut svc, dbus)
+            .stop(&ctx, &mut svc, &mut dbus)
             .await
             .unwrap();
 
@@ -225,7 +225,7 @@ mod tests {
     async fn zero_grace_means_immediate_force_kill() {
         let (spawner, control, ctx, dir) = setup().await;
         let mut svc = WarpService::start(&spawner, &ctx).await.unwrap();
-        let dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
+        let mut dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
         let warp_pid = svc.pid();
         let clock = Arc::new(ManualClock::new());
 
@@ -235,7 +235,7 @@ mod tests {
             Duration::ZERO,
             Duration::from_millis(100),
         );
-        let outcome = stop.stop(&ctx, &mut svc, dbus).await.unwrap();
+        let outcome = stop.stop(&ctx, &mut svc, &mut dbus).await.unwrap();
 
         assert!(outcome.kill_required);
         assert!(spawner.was_killed(warp_pid));
@@ -249,12 +249,12 @@ mod tests {
         let (spawner, control, ctx, dir) = setup().await;
         control.fail_next(crate::runtime::control::WarpControlError::CommandTimeout);
         let mut svc = WarpService::start(&spawner, &ctx).await.unwrap();
-        let dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
+        let mut dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
         spawner.exit_on_terminate(svc.pid(), 0);
         let clock = Arc::new(ManualClock::new());
 
         let outcome = stop(Arc::new(control), clock)
-            .stop(&ctx, &mut svc, dbus)
+            .stop(&ctx, &mut svc, &mut dbus)
             .await
             .unwrap();
 
@@ -269,11 +269,11 @@ mod tests {
         std::fs::create_dir_all(&ctx.paths.state_dir).unwrap();
         std::fs::write(ctx.paths.state_dir.join("reg.json"), b"{}").unwrap();
         let mut svc = WarpService::start(&spawner, &ctx).await.unwrap();
-        let dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
+        let mut dbus = DbusRuntime::start(&spawner, &ctx).await.unwrap();
         spawner.exit_on_terminate(svc.pid(), 0);
 
         stop(Arc::new(control), Arc::new(ManualClock::new()))
-            .stop(&ctx, &mut svc, dbus)
+            .stop(&ctx, &mut svc, &mut dbus)
             .await
             .unwrap();
 

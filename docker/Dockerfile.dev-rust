@@ -12,7 +12,7 @@
 # - crates-io 必须用 config.toml source replacement 切 aliyun；环境变量
 #   CARGO_REGISTRIES_CRATES_IO_INDEX 对 crates-io 无效（cargo 文档仅支持
 #   registry.index / source.<name>.registry），实测 cargo 会退回官方 index。
-FROM rust:1.96
+FROM rust:1.96.0
 
 # 与宿主 ~/.cargo/config.toml 同款 source replacement：aliyun sparse 镜像。
 RUN mkdir -p /usr/local/cargo \
