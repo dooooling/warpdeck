@@ -373,10 +373,23 @@ mod tests {
         let mut handle = spawner.spawn(&cmd).unwrap();
         let status = handle.wait().await;
         assert_eq!(status.exit_code, Some(0));
-        let content = std::fs::read_to_string(&log).unwrap();
-        assert!(content.contains("boom"));
+        // 脱敏泵是异步任务：子进程退出 ≠ 已落盘，轮询等待。
+        wait_for_log(&log, "boom").await;
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P1 审查 R3#7：泵为异步任务，子进程退出 ≠ 已写盘——轮询直到出现期望
+    /// 片段（上限 5s），消除 CI 时序竞态。
+    async fn wait_for_log(path: &std::path::Path, needle: &str) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let content = std::fs::read_to_string(path).unwrap_or_default();
+            if content.contains(needle) || tokio::time::Instant::now() > deadline {
+                return content;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test]
@@ -400,6 +413,7 @@ mod tests {
         let mut handle = spawner.spawn(&cmd).unwrap();
         let status = handle.wait().await;
         assert_eq!(status.exit_code, Some(0));
+        let _content = wait_for_log(&log, "err").await;
         let content = std::fs::read_to_string(&log).unwrap();
         assert!(content.contains("out"), "stdout captured: {content}");
         assert!(content.contains("err"), "stderr captured: {content}");
@@ -442,7 +456,7 @@ mod tests {
         let mut handle = spawner.spawn(&cmd).unwrap();
         let status = handle.wait().await;
         assert_eq!(status.exit_code, Some(0), "脚本正常退出");
-        let content = std::fs::read_to_string(&log).unwrap();
+        let content = wait_for_log(&log, &"c".repeat(300)).await;
         #[cfg(unix)]
         {
             // 回归核心：三段各 300 字节必须全部完整落盘（旧实现下 c 段从 b 段
