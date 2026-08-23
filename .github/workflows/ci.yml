@@ -58,3 +58,10 @@ jobs:
         run: pnpm typecheck
       - name: test
         run: pnpm test
+      # P1 审查 R3#5：生产构建必须可编译（mock server 直接 serve dist）。
+      - name: build
+        run: pnpm build
+      - name: Install Playwright chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Browser E2E (mock)
+        run: pnpm e2e

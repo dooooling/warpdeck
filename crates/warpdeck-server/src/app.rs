@@ -285,7 +285,6 @@ impl TestApp {
             db::repo::instance_repo(pool.clone()),
             Arc::new(db::repo::SqliteProxyConfigRepository::new(pool.clone())),
             registry,
-            runtime.clone(),
             Arc::new(SqliteUserRepository::new(pool.clone())),
             Arc::new(SqliteSessionRepository::new(pool.clone())),
             Arc::new(SqliteSecretStore::new(pool.clone(), key)),

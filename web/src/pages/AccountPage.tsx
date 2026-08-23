@@ -115,6 +115,7 @@ export function AccountPage() {
       return
     }
     const parsed = accountSchema(t).safeParse(form)
+    let values: AccountFormValues = form
     if (!parsed.success) {
       const errors: Record<string, string> = {}
       for (const issue of parsed.error.issues) {
@@ -132,10 +133,17 @@ export function AccountPage() {
           errors[path] = issue.message
         }
       }
-      setFieldErrors(errors)
-      return
+      // P1 审查 R3#5 附带修复：全部 issue 都被「保持现有」跳过时不得静默
+      // return——否则编辑已配置档案点保存毫无反应。
+      if (Object.keys(errors).length > 0) {
+        setFieldErrors(errors)
+        return
+      }
+      // 全部跳过：以表单当前值提交（空白 secret 由 buildRequest 转为保持）。
+    } else {
+      values = parsed.data
     }
-    const payload = buildRequest(parsed.data, form.mode)
+    const payload = buildRequest(values, form.mode)
     if (editing) {
       // PATCH 需要 name（后端 always 校验 name）；保持原名即可。
       updateMut.mutate(

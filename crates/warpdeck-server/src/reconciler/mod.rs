@@ -223,7 +223,15 @@ impl Reconciler {
                     "desired record removed; stopping runtime",
                 );
                 if let Err(e) = self.runtime.stop(id).await {
-                    error!(component = "reconciler", instance = %id.as_i64(), error = %e, "orphan stop failed");
+                    // P1 审查 R3#2：stop 失败**不得**移除 registry 条目——
+                    // 条目是下一轮重试的唯一凭据；移除后该进程永久失控。
+                    error!(
+                        component = "reconciler",
+                        instance = %id.as_i64(),
+                        error = %e,
+                        "orphan stop failed; keeping registry entry for retry"
+                    );
+                    continue;
                 }
                 self.registry.remove(id);
             }
@@ -269,6 +277,17 @@ impl Reconciler {
         match actual {
             None | Some(RuntimeState::Stopped) => self.start_instance(spec).await,
             Some(RuntimeState::Failed) => {
+                // P1 审查 R3#1：显式重启命令**优先于**自动重启策略——
+                // auto_restart=false 时手动恢复不得永久悬空；
+                // auto_restart=true 时手动恢复不被退避窗口阻塞。
+                if spec.restart_command_generation > spec.observed_restart_generation {
+                    info!(
+                        component = "reconciler",
+                        instance = %spec.id.as_i64(),
+                        "explicit restart command overrides failed-state policy (auto_restart/backoff)"
+                    );
+                    return self.restart_instance(spec).await;
+                }
                 if spec.auto_restart {
                     if self.backoff_ready(spec).await {
                         self.restart_instance(spec).await

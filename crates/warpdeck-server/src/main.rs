@@ -154,7 +154,7 @@ async fn serve(cfg: config::AppConfig) {
     let runtime: Arc<dyn WarpRuntime> = manager.clone();
 
     // 健康监控（P4-007）：独立循环；`health_cancel` 置位/drop 时停止。
-    let (health_handle, health_cancel) = HealthMonitor::new(
+    let (mut health_handle, health_cancel) = HealthMonitor::new(
         manager.clone(),
         clock.clone(),
         HealthConfig::default(),
@@ -205,7 +205,7 @@ async fn serve(cfg: config::AppConfig) {
         bus.clone(),
         apply_error.clone(),
     );
-    let reconciler_handle = tokio::spawn(async move {
+    let mut reconciler_handle = tokio::spawn(async move {
         reconciler.run().await;
     });
 
@@ -219,7 +219,6 @@ async fn serve(cfg: config::AppConfig) {
         instances,
         proxy_repo,
         registry,
-        runtime,
         users,
         sessions,
         secrets,
@@ -255,13 +254,27 @@ async fn serve(cfg: config::AppConfig) {
     .await
     .expect("server error");
 
-    // ---------- 有序关停树（P1 审查 R2#5） ----------
-    // ② 健康监控：先停探测，避免与实例停止竞态评估。
+    // ---------- 有序关停树（P1 审查 R2#5 / R3#3） ----------
+    // ② 健康监控：先停探测。join 超时 → 显式 abort()（drop JoinHandle 只会
+    //    detach 任务，不会取消——必须 abort 才能杜绝与后续清理的竞争）。
     drop(health_cancel);
-    let _ = tokio::time::timeout(Duration::from_secs(5), health_handle).await;
+    if tokio::time::timeout(Duration::from_secs(5), &mut health_handle)
+        .await
+        .is_err()
+    {
+        tracing::warn!("shutdown: health monitor join timed out; aborting");
+        health_handle.abort();
+    }
 
-    // ③ reconciler：等当前轮收敛完成（有界；它持有 DB/运行时引用）。
-    let _ = tokio::time::timeout(Duration::from_secs(10), reconciler_handle).await;
+    // ③ reconciler：等当前轮收敛完成（它响应 shutdown watch，通常先于超时
+    //    自然退出）；超时才 abort 兜底。
+    if tokio::time::timeout(Duration::from_secs(10), &mut reconciler_handle)
+        .await
+        .is_err()
+    {
+        tracing::warn!("shutdown: reconciler join timed out; aborting");
+        reconciler_handle.abort();
+    }
     tracing::info!("shutdown: reconciler stopped");
 
     // ④ GOST 数据面。
@@ -269,11 +282,23 @@ async fn serve(cfg: config::AppConfig) {
         tracing::warn!(error = %e, "gost stop failed during shutdown");
     }
 
-    // ⑤ 全部 WARP 实例 + 子进程回收（单实例失败不阻塞其余）。
-    manager.stop_all().await;
+    // ⑤ 全部 WARP 实例 + 子进程回收；**全局 deadline** 防止后台任务持有锁
+    //    导致无限阻塞（P1 审查 R3#3）。容器场景子进程随 PID 1 终结兜底。
+    match tokio::time::timeout(Duration::from_secs(30), manager.stop_all()).await {
+        Ok(_) => tracing::info!("shutdown: all instances stopped"),
+        Err(_) => tracing::error!(
+            "shutdown: stop_all exceeded 30s deadline; continuing teardown (children die with container)"
+        ),
+    }
 
-    // ⑥ log tail watcher（文件随实例目录消失自然退出；有界等待兜底）。
-    let _ = tokio::time::timeout(Duration::from_secs(5), tail_handles).await;
+    // ⑥ log tail watcher（有界等待；超时记录——watcher 只读文件+推 bus，
+    //    进程退出即终结）。
+    if tokio::time::timeout(Duration::from_secs(5), tail_handles)
+        .await
+        .is_err()
+    {
+        tracing::warn!("shutdown: log tail watchers did not exit in time");
+    }
 
     // ⑦ SQLite 最后关闭。
     pool.close().await;

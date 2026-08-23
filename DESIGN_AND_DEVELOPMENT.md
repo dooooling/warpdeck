@@ -2221,6 +2221,11 @@ Command::new("sh")
 
 ## 21.1 AppState
 
+> **P1 审查 R3 修订（2026-08-23）**：以下为早期草图，**已过时**。真实实现见
+> `api/mod.rs::ApiState`——handler 只写 SQLite 期望状态并 notify；运行时唯一
+> 写入者是 Reconciler（R2#1 起 restart 走命令代数、delete 走孤儿收敛），
+> `ApiState.runtime` 字段已移除以防绕过。保留本节仅作历史对照。
+
 ```rust
 #[derive(Clone)]
 pub struct AppState {

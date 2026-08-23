@@ -39,8 +39,16 @@ pub async fn status(
         Err(_) => "unavailable",
     };
 
+    // P1 审查 R3 次要项：区分进程 liveness 与系统 readiness——存在数据面
+    // failed/degraded、密钥不可用、未应用的配置错误时降级为 "degraded"；
+    // stopped/unknown 且无错误属正常（如双 listener 全关或测试桩）。
+    let has_problem = matches!(gost_view.status.as_str(), "failed" | "degraded")
+        || secret_store != "ok"
+        || state.apply_error.lock().unwrap().is_some();
+    let readiness = if has_problem { "degraded" } else { "ok" };
+
     Ok(Json(SystemStatusView {
-        status: "ok",
+        status: readiness,
         version: state.version.clone(),
         uptime_secs: state.started_at.elapsed().as_secs(),
         instances: counts,

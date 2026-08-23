@@ -45,7 +45,6 @@ use crate::db::repo::{ProxyConfigRepository, WarpInstanceRepository};
 use crate::runtime::events::EventBus;
 use crate::runtime::logs::LogBus;
 use crate::runtime::registry::RuntimeRegistry;
-use crate::runtime::WarpRuntime;
 
 pub use error::{ApiError, ApiResult};
 
@@ -59,7 +58,6 @@ pub struct ApiState {
     pub instances: Arc<dyn WarpInstanceRepository>,
     pub proxy: Arc<dyn ProxyConfigRepository>,
     pub registry: Arc<RuntimeRegistry>,
-    pub runtime: Arc<dyn WarpRuntime>,
     /// P8：用户/会话/secret/账号仓储。
     pub users: Arc<dyn UserRepository>,
     pub sessions: Arc<dyn SessionRepository>,
@@ -91,7 +89,6 @@ impl ApiState {
         instances: Arc<dyn WarpInstanceRepository>,
         proxy: Arc<dyn ProxyConfigRepository>,
         registry: Arc<RuntimeRegistry>,
-        runtime: Arc<dyn WarpRuntime>,
         users: Arc<dyn UserRepository>,
         sessions: Arc<dyn SessionRepository>,
         secrets: Arc<dyn SecretStore>,
@@ -111,7 +108,6 @@ impl ApiState {
             instances,
             proxy,
             registry,
-            runtime,
             users,
             sessions,
             secrets,

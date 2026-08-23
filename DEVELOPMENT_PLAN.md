@@ -1473,6 +1473,8 @@ proxy settings
 
 ```text
 /var/lib/warpdeck/generated/gost.yaml
+（2026-08-23 注：该文件含认证凭据明文，0600 权限；P1 审查 R3#7 后续批次
+  将评估改为仅内存渲染/写入边界脱敏，并纳入备份排除清单）
 ```
 
 流程：
