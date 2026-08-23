@@ -10,6 +10,7 @@ pub mod credentials;
 pub mod migrations;
 pub mod profiles;
 pub mod repo;
+pub mod uow;
 
 use std::str::FromStr;
 use std::time::Duration;

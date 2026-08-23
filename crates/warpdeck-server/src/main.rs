@@ -115,6 +115,11 @@ async fn serve(cfg: config::AppConfig) {
         Arc::new(SqliteAccountRepository::new(pool.clone()));
     let profiles: Arc<dyn warpdeck_server::db::profiles::AccountProfileRepository> =
         Arc::new(SqliteAccountProfileRepository::new(pool.clone()));
+    // P1 审查 R3#4：跨表一致性写（secret + 配置/档案同事务）。
+    let consistency = std::sync::Arc::new(warpdeck_server::db::uow::ConsistencyService::new(
+        pool.clone(),
+        master_key,
+    ));
 
     // --- 运行时栈（WARP 实例 + 健康监控）---
     let registry = Arc::new(RuntimeRegistry::new());
@@ -231,6 +236,7 @@ async fn serve(cfg: config::AppConfig) {
         cfg.data_dir.clone(),
         trigger,
         app_version(),
+        consistency.clone(),
         gost,
         apply_error,
     );

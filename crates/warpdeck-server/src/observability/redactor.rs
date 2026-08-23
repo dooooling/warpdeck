@@ -67,25 +67,23 @@ pub fn redact(value: impl AsRef<str>) -> String {
 //
 // 覆盖面（按序应用，先结构化后泛化）：
 //   B. JSON 字段："secret"/"password"/"token"/"license" 等键的字符串值；
-//   A. key=value / key: value 形态的敏感键（含 gost 配置回显、CLI --flag=）；
-//   C. 孤立长 token（hex ≥40 或 base64url 形 ≥43——sha256/JWT 片段等无上下文
-//      的高熵串；普通端口/IP/延迟数字不受影响）。
+//   A. key=value / key: value 形态的敏感键（含 gost 配置回显、CLI --flag=）。
 //
-// 残余风险（记录于 DESIGN §27.2）：未知格式的 secret 可能漏网；缓解 = API 面
-// （last_error 等）已改为稳定安全摘要（P0 #9），而日志文件本身仅宿主 root 可读。
+// 刻意**不做**孤立长 token 规则：无标签的高熵串（压缩行、哈希、minified
+// 输出）误伤面过大（实测把 300 字节的普通输出整段吞掉）。残余风险（记录于
+// DESIGN §27.2）：未知格式的 secret 可能漏网；缓解 = API 面（last_error 等）
+// 已改为稳定安全摘要（P0 #9），而日志文件本身仅宿主 root 可读。
 
 use std::sync::OnceLock;
 
 enum Rule {
     Json,
     KeyValue,
-    LongToken,
 }
 
 fn rule(rule: Rule) -> &'static regex::Regex {
     static JSON: OnceLock<regex::Regex> = OnceLock::new();
     static KV: OnceLock<regex::Regex> = OnceLock::new();
-    static LONG: OnceLock<regex::Regex> = OnceLock::new();
     match rule {
         Rule::Json => JSON.get_or_init(|| {
             // "password": "..." —— 值整体替换。
@@ -101,10 +99,6 @@ fn rule(rule: Rule) -> &'static regex::Regex {
             )
             .expect("static regex")
         }),
-        Rule::LongToken => LONG.get_or_init(|| {
-            regex::Regex::new(r"\b(?:[0-9a-fA-F]{40,}|[A-Za-z0-9+/_=-]{43,})\b")
-                .expect("static regex")
-        }),
     }
 }
 
@@ -119,7 +113,6 @@ pub fn scrub_line(line: &str) -> String {
     }
     let s = rule(Rule::Json).replace_all(line, r#"$1"[REDACTED]""#);
     let s = rule(Rule::KeyValue).replace_all(&s, "${1}${2}[REDACTED]");
-    let s = rule(Rule::LongToken).replace_all(&s, REDACTED);
     s.into_owned()
 }
 
@@ -190,18 +183,15 @@ mod tests {
         );
     }
 
+    /// 无标签长 token 刻意**不**脱敏（误伤面过大：压缩行/哈希/普通输出）——
+    /// 回归探针：普通长字母串原样保留。
     #[test]
-    fn long_tokens_are_masked_but_common_values_survive() {
-        // sha256/JWT 片段（hex≥40 / base64url≥43）。
+    fn long_unlabeled_tokens_pass_through() {
         let sha = "a".repeat(64);
         assert_eq!(
             scrub_line(&format!("digest {sha} ok")),
-            "digest [REDACTED] ok"
+            format!("digest {sha} ok")
         );
-        // JWT 片段（base64url ≥43）。
-        let jwt_part = "QmFzZTY0X1Rva2VuX1dpdGhfbG90c19vZl9DaGFyc19XaXRoX0xvdHNfT2ZfQ2hhcnM";
-        assert_eq!(scrub_line(jwt_part), REDACTED);
-
         // 常见运维值不受影响。
         assert_eq!(scrub_line("port 40000"), "port 40000");
         assert_eq!(scrub_line("ip 192.168.1.100"), "ip 192.168.1.100");

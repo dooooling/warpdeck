@@ -79,6 +79,8 @@ pub struct ApiState {
     pub version: String,
     /// P1 审查 #4：GOST 实际状态查询（与 reconciler 共享同一 Arc）。
     pub proxy_applier: Arc<dyn crate::reconciler::ProxyApplier>,
+    /// P1 审查 R3#4：跨表一致性写服务（secret+配置/档案同事务）。
+    pub consistency: Arc<crate::db::uow::ConsistencyService>,
     /// P1 审查 #3：最近一次代理应用失败（成功后清空；UI 直出）。
     pub apply_error: crate::reconciler::ApplyErrorSlot,
 }
@@ -101,6 +103,7 @@ impl ApiState {
         data_dir: PathBuf,
         trigger: Arc<Notify>,
         version: String,
+        consistency: std::sync::Arc<crate::db::uow::ConsistencyService>,
         proxy_applier: Arc<dyn crate::reconciler::ProxyApplier>,
         apply_error: crate::reconciler::ApplyErrorSlot,
     ) -> Self {
@@ -121,6 +124,7 @@ impl ApiState {
             trigger,
             started_at: Instant::now(),
             version,
+            consistency,
             proxy_applier,
             apply_error,
         }

@@ -113,48 +113,93 @@ impl ProcessSpawner for TokioProcessSpawner {
         let mut builder = tokio::process::Command::new(&cmd.program);
         builder.args(&cmd.args);
         builder.envs(cmd.envs.iter().map(|(k, v)| (k, v)));
-        if let Some(log_path) = &cmd.stdout_log_path {
-            // 合并场景（stdout == stderr 路径）必须用 append 打开：
-            // 两个进程句柄指向同一 inode，若 stdout 是独立 offset 的 create 句柄，
-            // 其后续写入会覆盖 stderr 已追加的字节（review 发现）。
-            // 非合并场景保持 truncate 语义（spawn 从空文件开始）。
-            let same_as_stderr = Some(log_path) == cmd.stderr_log_path.as_ref();
-            let file = if same_as_stderr {
-                // 合并场景：先 File::create 完成截断创建（子进程输出从空文件开始），
-                // 再以 append 打开——双句柄必须都 O_APPEND（Windows std 校验
-                // create+append+truncate 为 InvalidInput：append 只授
-                // FILE_APPEND_DATA、无截断权限，故 truncate 与 append 二选一，
-                // 截断交给前置 File::create）。
-                std::fs::File::create(log_path)?;
+
+        // P1 审查 R3#7：子进程输出**不再直接落盘**——改为管道 + 行级脱敏泵
+        // （scrub_line 后追加写入），原始输出（可能含 license/token/密码回显）
+        // 不进入持久卷与备份。文件打开语义与旧实现一致：
+        // - 双路径相同（合并）：create 截断一次，双 append 泵共享句柄副本；
+        // - 单边重定向：truncate 创建 + 单泵；未重定向的一侧保持 inherit。
+        enum PumpTarget {
+            Stdout,
+            Stderr,
+        }
+        let merged = cmd.stdout_log_path.is_some() && cmd.stdout_log_path == cmd.stderr_log_path;
+        let mut pipes: Vec<(PumpTarget, std::fs::File)> = Vec::new();
+        if let Some(path) = cmd
+            .stdout_log_path
+            .as_ref()
+            .or(cmd.stderr_log_path.as_ref())
+        {
+            let file = if merged {
+                std::fs::File::create(path)?;
                 std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(log_path)?
+                    .open(path)?
             } else {
-                std::fs::File::create(log_path)?
+                std::fs::File::create(path)?
             };
-            builder.stdout(std::process::Stdio::from(file));
+            if cmd.stdout_log_path.is_some() {
+                builder.stdout(std::process::Stdio::piped());
+                pipes.push((PumpTarget::Stdout, file.try_clone()?));
+            } else {
+                builder.stdout(std::process::Stdio::inherit());
+            }
+            if cmd.stderr_log_path.is_some() {
+                builder.stderr(std::process::Stdio::piped());
+                pipes.push((PumpTarget::Stderr, file));
+            } else {
+                builder.stderr(std::process::Stdio::inherit());
+            }
         } else {
             builder.stdout(std::process::Stdio::inherit());
-        }
-        if let Some(log_path) = &cmd.stderr_log_path {
-            // stderr 与 stdout 同路径时以 append 打开，输出合并、不二次截断；
-            // 否则保持 truncate 语义（P2-006 原有行为）。
-            let same_as_stdout = Some(log_path) == cmd.stdout_log_path.as_ref();
-            let file = if same_as_stdout {
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log_path)?
-            } else {
-                std::fs::File::create(log_path)?
-            };
-            builder.stderr(std::process::Stdio::from(file));
-        } else {
             builder.stderr(std::process::Stdio::inherit());
         }
-        let child = builder.spawn()?;
+        let mut child = builder.spawn()?;
+
+        // 每条被重定向的管道启动脱敏泵。
+        for (target, file) in pipes {
+            match target {
+                PumpTarget::Stdout => {
+                    if let Some(stdout) = child.stdout.take() {
+                        tokio::spawn(pump_redacted(stdout, file));
+                    }
+                }
+                PumpTarget::Stderr => {
+                    if let Some(stderr) = child.stderr.take() {
+                        tokio::spawn(pump_redacted(stderr, file));
+                    }
+                }
+            }
+        }
+
         Ok(Box::new(TokioProcess { child: Some(child) }))
+    }
+}
+
+/// 行级脱敏泵：逐行读取子进程管道 → `scrub_line` → 追加写入日志文件。
+/// 子进程退出后管道 EOF，泵自然结束。写入失败仅静默忽略（日志非关键路径，
+/// 不得因磁盘问题反压拖垮数据面进程的 stdout 缓冲）。
+async fn pump_redacted<R>(reader: R, mut file: std::fs::File)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use std::io::Write as _;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                // 去掉行尾换行后脱敏，再统一补写 \n。
+                let trimmed = line.trim_end_matches(['\n', '\r']);
+                let scrubbed = crate::observability::redactor::scrub_line(trimmed);
+                let _ = writeln!(file, "{scrubbed}");
+            }
+        }
     }
 }
 
@@ -328,10 +373,23 @@ mod tests {
         let mut handle = spawner.spawn(&cmd).unwrap();
         let status = handle.wait().await;
         assert_eq!(status.exit_code, Some(0));
-        let content = std::fs::read_to_string(&log).unwrap();
-        assert!(content.contains("boom"));
+        // 脱敏泵是异步任务：子进程退出 ≠ 已落盘，轮询等待。
+        wait_for_log(&log, "boom").await;
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P1 审查 R3#7：泵为异步任务，子进程退出 ≠ 已写盘——轮询直到出现期望
+    /// 片段（上限 5s），消除 CI 时序竞态。
+    async fn wait_for_log(path: &std::path::Path, needle: &str) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let content = std::fs::read_to_string(path).unwrap_or_default();
+            if content.contains(needle) || tokio::time::Instant::now() > deadline {
+                return content;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test]
@@ -355,6 +413,7 @@ mod tests {
         let mut handle = spawner.spawn(&cmd).unwrap();
         let status = handle.wait().await;
         assert_eq!(status.exit_code, Some(0));
+        let _content = wait_for_log(&log, "err").await;
         let content = std::fs::read_to_string(&log).unwrap();
         assert!(content.contains("out"), "stdout captured: {content}");
         assert!(content.contains("err"), "stderr captured: {content}");
@@ -397,20 +456,34 @@ mod tests {
         let mut handle = spawner.spawn(&cmd).unwrap();
         let status = handle.wait().await;
         assert_eq!(status.exit_code, Some(0), "脚本正常退出");
-        let content = std::fs::read_to_string(&log).unwrap();
+        let content = wait_for_log(&log, &"c".repeat(300)).await;
         #[cfg(unix)]
         {
             // 回归核心：三段各 300 字节必须全部完整落盘（旧实现下 c 段从 b 段
             // 起始处覆写，总长只剩 600 且 b 全丢）。不强制段序——sh 对重定向
             // stdout 的缓冲策略（dash 逐写 / bash 块缓冲）会改变段间顺序，
             // 与「是否覆盖」正交。
-            assert_eq!(content.len(), 900, "总字节数（防覆盖）: {content}");
-            assert!(content.contains(&"a".repeat(300)), "stdout 首段: {content}");
+            // P1 审查 R3#7：输出经行级脱敏泵落盘——stdout/stderr 为两条独立
+            // 异步行，各自补 \n，总长 902；断言改为语义级：三段各 300 字节完整、
+            // 字符集仅 abc（任何字节被覆盖都会破坏其一）。
+            let compact: String = content.chars().filter(|&ch| ch != '\n').collect();
+            assert_eq!(compact.len(), 900, "总字节数（防覆盖）: {content}");
             assert!(
-                content.contains(&"b".repeat(300)),
-                "stderr 不得被后续 stdout 覆盖（双 append 修复）: {content}"
+                compact.contains(&"a".repeat(300)),
+                "stdout 首段完整: {content}"
             );
-            assert!(content.contains(&"c".repeat(300)), "stdout 末段: {content}");
+            assert!(
+                compact.contains(&"b".repeat(300)),
+                "stderr 不得被后续 stdout 覆盖: {content}"
+            );
+            assert!(
+                compact.contains(&"c".repeat(300)),
+                "stdout 末段完整: {content}"
+            );
+            assert!(
+                compact.chars().all(|ch| matches!(ch, 'a' | 'b' | 'c')),
+                "不得出现覆写产生的混合字节: {content}"
+            );
         }
         #[cfg(not(unix))]
         {
