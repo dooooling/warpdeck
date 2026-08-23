@@ -533,6 +533,28 @@ impl InstanceManager {
         self.registry.ids()
     }
 
+    /// 优雅关停（P1 审查 R2#5）：停止所有运行中实例并回收子进程。
+    /// 单实例失败不阻塞其余；调用方负责在关闭数据库**之前** await 本方法。
+    pub async fn stop_all(&self) {
+        let ids: Vec<InstanceId> = self
+            .current_run
+            .lock()
+            .expect("current_run lock poisoned")
+            .keys()
+            .copied()
+            .collect();
+        for id in ids {
+            if let Err(e) = WarpRuntime::stop(self, id).await {
+                tracing::warn!(
+                    component = "manager",
+                    instance_id = %id.as_i64(),
+                    error = %e,
+                    "stop_all: instance stop failed during shutdown"
+                );
+            }
+        }
+    }
+
     /// 健康检查用：收集一实例的三层探测报告（P4-002/003/004）。
     ///
     /// 跳过非健康态实例（Starting/Stopping/Failed/Stopped——进程由 crash
