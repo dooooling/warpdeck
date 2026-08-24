@@ -22,24 +22,41 @@ async fn spawn_fake_upstream() -> FakeUpstream {
     let addr = listener.local_addr().unwrap();
     let task = tokio::spawn(async move {
         loop {
-            let Ok((mut s, _)) = listener.accept().await else { break };
+            let Ok((mut s, _)) = listener.accept().await else {
+                break;
+            };
             tokio::spawn(async move {
                 let mut h = [0u8; 2];
-                if s.read_exact(&mut h).await.is_err() { return; }
+                if s.read_exact(&mut h).await.is_err() {
+                    return;
+                }
                 let _ = s.write_all(&[0x05, 0x00]).await;
                 let mut r = [0u8; 4];
-                if s.read_exact(&mut r).await.is_err() { return; }
-                if r[3] != 0x01 { return; }
+                if s.read_exact(&mut r).await.is_err() {
+                    return;
+                }
+                if r[3] != 0x01 {
+                    return;
+                }
                 let mut o = [0u8; 4];
-                if s.read_exact(&mut o).await.is_err() { return; }
+                if s.read_exact(&mut o).await.is_err() {
+                    return;
+                }
                 let mut p = [0u8; 2];
-                if s.read_exact(&mut p).await.is_err() { return; }
-                let _ = s.write_all(&[0x05,0x00,0x00,0x01,0,0,0,0,0,0]).await;
+                if s.read_exact(&mut p).await.is_err() {
+                    return;
+                }
+                let _ = s
+                    .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                    .await;
                 let mut b = vec![0u8; 512];
                 loop {
                     match s.read(&mut b).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => { let _ = s.write_all(b"UP:").await; let _ = s.write_all(&b[..n]).await; }
+                        Ok(n) => {
+                            let _ = s.write_all(b"UP:").await;
+                            let _ = s.write_all(&b[..n]).await;
+                        }
                     }
                 }
             });
@@ -94,7 +111,9 @@ async fn builtin_gateway_connect_end_to_end() {
     c.read_exact(&mut greet).await.unwrap();
     assert_eq!(greet, [0x05, 0x00]);
 
-    c.write_all(&[0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0, 80]).await.unwrap();
+    c.write_all(&[0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0, 80])
+        .await
+        .unwrap();
     let mut reply = [0u8; 10];
     c.read_exact(&mut reply).await.unwrap();
     assert_eq!(reply[1], 0x00);
