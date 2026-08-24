@@ -166,8 +166,21 @@ fn assert(msg: &str, cond: bool) -> Result<()> {
         Ok(())
     } else {
         println!("  FAIL: {msg}");
+        dump_container_logs();
         bail!("E2E assertion failed: {msg}")
     }
+}
+
+/// 失败诊断：转储容器最近日志（P13-C 起数据面在容器内，宿主侧断言失败
+/// 时没有服务端上下文无法定位）。尽力而为——容器可能已不存在。
+fn dump_container_logs() {
+    let container = format!("{PROJECT}-warpdeck-1");
+    println!("--- docker logs (tail 300) {container} ---");
+    let _ = Command::new("docker")
+        .args(["logs", "--tail", "300", &container])
+        .stderr(Stdio::inherit())
+        .status();
+    println!("--- end docker logs ---");
 }
 
 /// compose 带超时（输出直通实时显示；超时强杀子进程）。

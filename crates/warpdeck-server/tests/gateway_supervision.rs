@@ -100,6 +100,22 @@ async fn full_session(addr: std::net::SocketAddr) -> bool {
     c.write_all(b"ping").await.is_ok()
 }
 
+/// 打开一条已完成 CONNECT 的会话（占住，供后续读写断言）。
+async fn open_session(addr: std::net::SocketAddr) -> TcpStream {
+    let mut c = TcpStream::connect(addr).await.unwrap();
+    c.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+    let mut greet = [0u8; 2];
+    c.read_exact(&mut greet).await.unwrap();
+    assert_eq!(greet, [0x05, 0x00]);
+    c.write_all(&[0x05, 0x01, 0x00, 0x01, 1, 2, 3, 4, 0, 80])
+        .await
+        .unwrap();
+    let mut reply = [0u8; 10];
+    c.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply[1], 0x00);
+    c
+}
+
 #[tokio::test]
 async fn injected_serve_panic_is_recovered_by_supervision() {
     let _ = warpdeck_server::observability::init_tracing("debug", None);
@@ -152,4 +168,77 @@ async fn injected_serve_panic_is_recovered_by_supervision() {
         }
     }
     assert!(recovered, "gateway must recover after serve-task panic");
+}
+
+/// 幂等 diff-skip（E2E-03 回归）：reconciler 每轮重放同一份期望配置，
+/// 内容未变化时**不得**重建 listener——否则在途会话每 reconcile 周期
+/// 被拆一次。变更配置仍必须触发重建（与 GOST restart 语义一致）。
+#[tokio::test]
+async fn identical_reapply_keeps_sessions_alive_and_change_rebuilds() {
+    let up = spawn_fake_upstream().await;
+    let reg = Arc::new(RuntimeRegistry::new());
+    let id = warpdeck_server::runtime::instance::InstanceId::from_db(1).unwrap();
+    reg.insert(id);
+    reg.set_state(id, RuntimeState::Healthy);
+
+    let socks5_addr = reserve_loopback_port();
+    let pool = RoundRobinPool::with_upstream_base(reg.clone(), up.port() - 1);
+    let gw = BuiltinGateway::with_pool(reg, pool, socks5_addr, "127.0.0.1:0".parse().unwrap());
+
+    let settings = ProxySettings {
+        socks5_enabled: true,
+        http_enabled: false,
+        auth: None,
+        allowlist: vec![],
+        max_connections: None,
+        max_rps: None,
+    };
+    gw.apply_config(&settings).await.unwrap();
+
+    let (_tx, shutdown) = tokio::sync::watch::channel(false);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let runner = gw.clone();
+    tokio::spawn(async move { runner.run_with_ready(shutdown, Some(ready_tx)).await });
+    let _ = ready_rx.await.expect("gateway ready");
+
+    // 在途会话 + 同配置重放 ×3（模拟 reconciler 周期）。
+    let mut c = open_session(socks5_addr).await;
+    for _ in 0..3 {
+        gw.apply_config(&settings).await.unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    c.write_all(b"ping")
+        .await
+        .expect("session must survive identical re-applies");
+    let mut echo = vec![0u8; 7];
+    c.read_exact(&mut echo).await.unwrap();
+    assert_eq!(&echo, b"UP:ping");
+
+    // 变更配置（allowlist 收紧）→ 重建后**新会话**必须按新配置拒绝
+    // （既有会话由独立 handler 任务服务，允许优雅存活到自然结束）。
+    let changed = ProxySettings {
+        allowlist: vec!["10.0.0.0/8".to_string()],
+        ..settings.clone()
+    };
+    gw.apply_config(&changed).await.unwrap();
+    // 有界等待重建完成：新连接来自 127.0.0.1，不在 10.0.0.0/8 内 → 被拒。
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut rejected = false;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Ok(mut n) = TcpStream::connect(socks5_addr).await {
+            // 允许短暂的旧代 listener：继续探测直到新代生效。
+            n.write_all(&[0x05, 0x01, 0x00]).await.ok();
+            let mut greet = [0u8; 2];
+            match tokio::time::timeout(Duration::from_secs(2), n.read_exact(&mut greet)).await {
+                Ok(Ok(_)) if greet != [0x05, 0x00] => {}
+                Ok(Ok(_)) => continue, // 旧代仍放行，继续等
+                Ok(Err(_)) | Err(_) => {
+                    rejected = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(rejected, "config change must take effect for new sessions");
 }

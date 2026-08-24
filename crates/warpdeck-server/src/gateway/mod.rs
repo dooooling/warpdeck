@@ -62,6 +62,10 @@ impl GatewayConfig {
 #[derive(Default)]
 pub(crate) struct SharedState {
     config: Mutex<Option<GatewayConfig>>,
+    /// 最近一次 apply 的期望配置（幂等 diff-skip：reconciler 每轮重放同一份
+    /// 期望配置，内容未变化时**不得**触发 listener 重建——否则每 reconcile
+    /// 周期都会拆掉在途会话，等价于旧 GostManager 的 diff-skip 语义）。
+    last_applied: Mutex<Option<ProxySettings>>,
     stopped: AtomicBool,
     active: AtomicBool,
     last_error: Mutex<Option<String>>,
@@ -370,6 +374,17 @@ impl BuiltinGateway {
 #[async_trait::async_trait]
 impl crate::reconciler::ProxyApplier for BuiltinGateway {
     async fn apply_config(&self, settings: &ProxySettings) -> Result<(), String> {
+        // 幂等 diff-skip（P13-C 回归修复）：reconciler 每轮重放同一份期望
+        // 配置，内容未变化时不重建 listener（否则每 reconcile 周期都会中断
+        // 全部在途会话）。stop() 会清空 last_applied，stop 后重放同配置仍会
+        // 正确触发启动。
+        {
+            let mut last = self.shared.last_applied.lock().unwrap();
+            if last.as_ref() == Some(settings) {
+                return Ok(());
+            }
+            *last = Some(settings.clone());
+        }
         self.shared
             .set_config(Some(GatewayConfig::from_settings(settings)));
         Ok(())
@@ -403,6 +418,8 @@ impl crate::reconciler::ProxyApplier for BuiltinGateway {
 
     async fn stop(&self) -> Result<(), String> {
         self.shared.stopped.store(true, Ordering::SeqCst);
+        // 清空 diff-skip 基线：stop 后即使重放同一份配置也必须真正启动。
+        *self.shared.last_applied.lock().unwrap() = None;
         self.shared.wake.notify_waiters();
         self.shared.active.store(false, Ordering::SeqCst);
         Ok(())

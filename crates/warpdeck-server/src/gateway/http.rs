@@ -246,18 +246,21 @@ async fn dial_socks5(
             format!("upstream socks5 connect failed: rep={:#x}", head[1]),
         ));
     }
-    let skip = match head[3] {
+    // 消费 BND.ADDR/BND.PORT（4 字节头已读；此处是**剩余**字节数）。
+    // P13-C 审查修复：原实现对 0x01 把 6 当成「含头总数」只丢弃 2 字节，
+    // 每条隧道泄漏 4 个 \0 进客户端流（TLS 握手必败，E2E-03 根因）。
+    let remaining = match head[3] {
         0x01 => 6,
         0x03 => {
             let mut l = [0u8; 1];
             up.read_exact(&mut l).await?;
             l[0] as usize + 2
         }
-        0x04 => 18,
+        0x04 => 16,
         _ => 6,
     };
-    if skip > 4 {
-        let mut discard = vec![0u8; skip - 4];
+    if remaining > 0 {
+        let mut discard = vec![0u8; remaining];
         up.read_exact(&mut discard).await?;
     }
     Ok(up)
