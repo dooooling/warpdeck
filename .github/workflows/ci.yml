@@ -9,6 +9,13 @@ on:
     branches: [main]
   pull_request:
 
+# P1 审查 R4（分钟数优化）：同一分支的 push 与 pull_request 共享一个组——
+# 后到的运行取消先到的，杜绝「同一 commit 跑两遍」。head_ref 仅存在于
+# pull_request 事件，push 事件回退到 ref。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     # 双侧钉住（2026-08-21 教训）：unix cfg 代码与新版 clippy 行为只在 Linux 暴露，

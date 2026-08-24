@@ -30,6 +30,8 @@ pub struct InstanceView {
     pub colo: Option<String>,
     pub latency_ms: Option<u32>,
     pub last_error: Option<String>,
+    /// 实际重启次数（RuntimeRegistry.restart_count；未运行 = 0，P1 审查 R4）。
+    pub restarts: u32,
     /// v0.2：绑定的账号档案摘要（NULL = 默认 free 档，展开其信息，§17.4）。
     pub account: Option<AccountRefView>,
 }
@@ -45,7 +47,7 @@ pub struct AccountRefView {
 impl InstanceView {
     /// 由期望记录 + 实际快照合并；快照缺省（从未启动）视为 `stopped`。
     pub fn from_parts(spec: &WarpInstanceSpec, actual: Option<&InstanceRuntime>) -> Self {
-        let (state, exit_v4, exit_v6, colo, latency_ms, last_error) = match actual {
+        let (state, exit_v4, exit_v6, colo, latency_ms, last_error, restarts) = match actual {
             Some(r) => (
                 r.state,
                 r.exit_ip_v4.map(|ip| ip.to_string()),
@@ -53,8 +55,9 @@ impl InstanceView {
                 r.colo.clone(),
                 r.latency_ms,
                 r.last_error.clone(),
+                r.restart_count,
             ),
-            None => (RuntimeState::Stopped, None, None, None, None, None),
+            None => (RuntimeState::Stopped, None, None, None, None, None, 0),
         };
         Self {
             id: spec.id.as_i64(),
@@ -69,6 +72,7 @@ impl InstanceView {
             colo,
             latency_ms,
             last_error,
+            restarts,
             account: None,
         }
     }

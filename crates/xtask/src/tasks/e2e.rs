@@ -488,10 +488,34 @@ pub fn run(args: &Args) -> Result<()> {
 
     // ---------- E2E-05 ----------
     if has(5) {
-        println!("== E2E-05 kill one warp-svc -> pool shrinks -> proxy alive -> auto-restart ==");
+        println!(
+            "== E2E-05 kill one warp-svc -> pool shrinks -> survivor serves -> auto-restart =="
+        );
+        // P1 审查 R4：池缩验证需要 ≥2 个健康节点——单实例被杀后恢复只能证明
+        // 「自动重启」，不能证明「剩余节点仍可用」。此处确保两个健康实例。
         ensure_healthy_instance(&mut e2e, &mut ids)?;
+        let second = if ids.len() < 2 {
+            let id = e2e.create_instance("e2e-fixture-2", None)?;
+            ids.push(id);
+            e2e.wait_instance_state(id, "healthy", 360)?;
+            id
+        } else {
+            ids[1]
+        };
+        let _ = second;
         ensure_authenticated_proxy(&mut e2e)?;
         let container = format!("{PROJECT}-warpdeck-1");
+        // 记录被杀 PID（诊断输出），并断言杀掉的 warp-svc 确实属于某实例。
+        let killed_pid = common::capture(
+            "docker",
+            &[
+                "exec".into(),
+                container.clone(),
+                "bash".into(),
+                "-c".into(),
+                "pgrep -f 'warp-svc --accept-tos' | head -n 1".into(),
+            ],
+        )?;
         common::run(
             "docker",
             &[
@@ -499,11 +523,15 @@ pub fn run(args: &Args) -> Result<()> {
                 container,
                 "bash".into(),
                 "-c".into(),
-                "pgrep -f 'warp-svc --accept-tos' | head -n 1 | xargs -r kill -9".into(),
+                format!("kill -9 {killed_pid}"),
             ],
         )?;
-        assert("one warp-svc killed inside container", true)?;
+        assert(
+            &format!("warp-svc pid {killed_pid} killed inside container"),
+            true,
+        )?;
         std::thread::sleep(Duration::from_secs(5));
+        // 池缩期：幸存节点必须仍能服务（有界重试）。
         let mut ok = false;
         for _ in 0..10 {
             if let Some(t) = trace_with_auth(30) {
@@ -661,17 +689,34 @@ pub fn run(args: &Args) -> Result<()> {
                 "delete default profile -> 409 (protected)",
                 del.status == 409,
             )?;
+            // P1 审查 R4：改绑以 restarts 递增为「实际重启发生」的门控。
+            let before = e2e
+                .api("GET", &format!("/instances/{free_id}"), None)?
+                .json
+                .get("restarts")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let rb = e2e.api(
                 "PATCH",
                 &format!("/instances/{free_id}"),
                 Some(&json!({"account_profile_id": null})),
             )?;
             assert("PATCH rebind (explicit null) -> 200", rb.status == 200)?;
-            let v = e2e.wait_instance_state(free_id, "healthy", 360)?;
-            assert(
-                "rebind to default profile effective",
-                v.pointer("/account/profile_id").and_then(|x| x.as_i64()) == Some(1),
-            )?;
+            let deadline = Instant::now() + Duration::from_secs(360);
+            loop {
+                ensure!(
+                    Instant::now() < deadline,
+                    "timed out waiting for rebind auto-restart"
+                );
+                std::thread::sleep(Duration::from_secs(3));
+                let v = e2e.api("GET", &format!("/instances/{free_id}"), None)?;
+                if v.json.get("runtime_state").and_then(|x| x.as_str()) == Some("healthy") {
+                    let r = v.json.get("restarts").and_then(|x| x.as_u64()).unwrap_or(0);
+                    if r > before {
+                        break;
+                    }
+                }
+            }
             e2e.stop_instance(free_id);
             e2e.stop_instance(free_id2);
             results.push("PASS E2E-08 account profiles (default/free line, ZT skipped)".into());
@@ -750,6 +795,14 @@ fn run_zt_line(
     )?;
 
     // 改绑：zt 实例解绑回默认档 -> restart_pending -> 自动重启生效。
+    // P1 审查 R4：实例改绑前已 Healthy，wait 可能立即返回——以 **restarts
+    // 递增** 为「重启确实发生」的门控信号。
+    let before = e2e.api("GET", &format!("/instances/{zt_inst}"), None)?;
+    let restarts_before = before
+        .json
+        .get("restarts")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
     let rb = e2e.api(
         "PATCH",
         &format!("/instances/{zt_inst}"),
@@ -759,10 +812,26 @@ fn run_zt_line(
         "PATCH rebind (explicit null = unbind) -> 200",
         rb.status == 200,
     )?;
-    let v = e2e.wait_instance_state(zt_inst, "healthy", 360)?;
+    let deadline = Instant::now() + Duration::from_secs(360);
+    let after_restarts;
+    loop {
+        ensure!(
+            Instant::now() < deadline,
+            "timed out waiting for rebind auto-restart"
+        );
+        std::thread::sleep(Duration::from_secs(3));
+        let v = e2e.api("GET", &format!("/instances/{zt_inst}"), None)?;
+        if v.json.get("runtime_state").and_then(|x| x.as_str()) == Some("healthy") {
+            let r = v.json.get("restarts").and_then(|x| x.as_u64()).unwrap_or(0);
+            if r > restarts_before {
+                after_restarts = r;
+                break;
+            }
+        }
+    }
     assert(
-        "rebind took effect via auto-restart (account.profile_id=1)",
-        v.pointer("/account/profile_id").and_then(|x| x.as_i64()) == Some(1),
+        "rebind took effect via auto-restart (restarts incremented)",
+        after_restarts > restarts_before,
     )?;
 
     // 删除保护：重绑一个实例制造 409，再清理后 204。

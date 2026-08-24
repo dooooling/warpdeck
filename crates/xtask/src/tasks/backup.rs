@@ -123,6 +123,23 @@ fn alpine_tar(vol: &str, host_dir: &Path, tar_args: &[&str]) -> Result<()> {
     common::run("docker", &a)
 }
 
+/// 同 [`alpine_tar`] 但 /backup 以**只读**方式挂载——用于解压/校验阶段，
+/// 确保提取动作不可能影响宿主备份目录（P1 审查 R4#1）。
+fn alpine_tar_ro(vol: &str, host_dir: &Path, tar_args: &[&str]) -> Result<()> {
+    let mut a: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "-v".into(),
+        format!("{vol}:/data"),
+        "-v".into(),
+        format!("{}:/backup:ro", host_dir.display()),
+        "alpine:3.20".into(),
+        "tar".into(),
+    ];
+    a.extend(tar_args.iter().map(|s| (*s).to_string()));
+    common::run("docker", &a)
+}
+
 /// 同 [`alpine_tar`] 但捕获 stdout（用于列目录校验）。
 fn alpine_tar_capture(vol: &str, host_dir: &Path, tar_args: &[&str]) -> Result<String> {
     let mut a: Vec<String> = vec![
@@ -137,6 +154,10 @@ fn alpine_tar_capture(vol: &str, host_dir: &Path, tar_args: &[&str]) -> Result<S
     ];
     a.extend(tar_args.iter().map(|s| (*s).to_string()));
     common::capture("docker", &a)
+}
+
+fn tracing_or_println(msg: &str) {
+    println!("[restore] {msg}");
 }
 
 fn compose(action: &str, project: &str) -> Result<()> {
@@ -195,20 +216,31 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
         .to_string_lossy()
         .to_string();
     let in_backup = format!("/backup/{name}");
+    // P1 审查 R4#1：名称/穿越检查用 tzf（纯文件名）；**类型预检**用 tzvf ——
+    // 解压前就拒绝 symlink('l')/硬链接('h') 条目，而非解压后才发现。
     let listing = alpine_tar_capture(&vol, &dir, &["tzf", &in_backup])?;
+    let verbose = alpine_tar_capture(&vol, &dir, &["tzvf", &in_backup])?;
     for required in ["warpdeck.db", "master.key"] {
         let found = listing
             .lines()
             .any(|l| l.trim_start_matches("./") == required);
         ensure!(found, "archive missing '{required}' - aborting restore");
     }
-    // P1 审查 R3#8：路径穿越守卫——任何 `..` 段或绝对路径条目直接拒绝。
+    // P1 审查 R3#8/R4#1：路径穿越守卫 + 条目类型守卫（解压前完成）。
     for entry in listing.lines() {
         let e = entry.trim_start_matches("./");
         ensure!(
             !e.split('/').any(|seg| seg == "..") && !entry.starts_with('/'),
             "archive contains unsafe path entry '{entry}' - aborting"
         );
+    }
+    for line in verbose.lines() {
+        if matches!(line.chars().next(), Some('l') | Some('h')) {
+            ensure!(
+                false,
+                "archive contains symlink/hardlink entry '{line}' - refusing to extract"
+            );
+        }
     }
 
     println!("== restore {} -> {vol} ==", abs.display());
@@ -238,33 +270,9 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
 
     compose("stop", &args.project)?;
     let result = (|| -> Result<()> {
-        // ① 解包到 staging。
-        alpine_tar(&staging_vol, &dir, &["xzf", &in_backup, "-C", "/data"])?;
-        // ② symlink/硬链接拒绝（防逃逸）。
-        let links = common::capture(
-            "docker",
-            &[
-                "run".into(),
-                "--rm".into(),
-                "-v".into(),
-                format!("{staging_vol}:/data"),
-                "alpine:3.20".into(),
-                "find".into(),
-                "/data".into(),
-                r"( -type l -o -type f )".into(),
-                "-exec".into(),
-                "test".into(),
-                "!".into(),
-                "{}".into(),
-                ";".into(),
-                "-print".into(),
-            ],
-        )?;
-        ensure!(
-            links.trim().is_empty(),
-            "archive contains symlink/hardlink entries - refusing"
-        );
-        // ③ SQLite 完整性校验。
+        // ① 解包到 staging（/backup 以只读挂载：解压阶段不可能影响宿主备份目录）。
+        alpine_tar_ro(&staging_vol, &dir, &["xzf", &in_backup, "-C", "/data"])?;
+        // ② SQLite 完整性校验（symlink/hardlink 已在 tzvf 预检阶段拒绝）。
         let integrity = common::capture(
             "docker",
             &[
@@ -282,7 +290,7 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
             integrity.trim() == "ok",
             "sqlite integrity_check failed: {integrity}"
         );
-        // ④ master.key 可解码为 32 字节（与 load_or_create 约定一致）。
+        // ③ master.key 可解码为 32 字节（与 load_or_create 约定一致）。
         let key_len = common::capture(
             "docker",
             &[
@@ -301,7 +309,7 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
             "master.key is not a base64-encoded 32-byte key (got {key_len} bytes)"
         );
 
-        // ⑤ 回滚副本：当前 live 数据打包回 backup_dir。
+        // ④ 回滚副本：当前 live 数据打包回 backup_dir。
         let rollback = format!("pre-restore-{}", stamp());
         alpine_tar_capture(
             &vol,
@@ -319,9 +327,10 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
             dir.join(format!("{rollback}.tar.gz")).display()
         );
 
-        // ⑥ 切换：清空 live → 从 staging 复制。
+        // ⑥ 切换：清空 live → 从 staging 复制 → **live 二次校验**；
+        //    复制/校验失败时**自动从回滚快照恢复 live**，绝不以半恢复态启动。
         alpine(&vol, &dir, "rm -rf /data/* /data/.[!.]*")?;
-        common::run(
+        let copy = common::run(
             "docker",
             &[
                 "run".into(),
@@ -335,7 +344,36 @@ pub fn restore(args: &RestoreArgs) -> Result<()> {
                 "-c".into(),
                 "cp -a /src/. /dst/".into(),
             ],
+        );
+        if let Err(e) = copy {
+            tracing_or_println(&format!(
+                "copy failed ({e}); rolling back live volume from {rollback}.tar.gz"
+            ));
+            alpine_tar_capture(
+                &vol,
+                &dir,
+                &["xzf", &format!("/backup/{rollback}.tar.gz"), "-C", "/data"],
+            )?;
+            bail!("restore copy failed; live volume rolled back from snapshot");
+        }
+        // live 二次校验（切换后仍需确认）。
+        let integrity2 = common::capture(
+            "docker",
+            &[
+                "run".into(),
+                "--rm".into(),
+                "-v".into(),
+                format!("{vol}:/data"),
+                "alpine:3.20".into(),
+                "sh".into(),
+                "-c".into(),
+                "apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /data/warpdeck.db 'PRAGMA integrity_check;'".to_string(),
+            ],
         )?;
+        ensure!(
+            integrity2.trim() == "ok",
+            "post-copy sqlite integrity_check failed: {integrity2}"
+        );
         Ok(())
     })();
 
