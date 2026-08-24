@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::runtime::instance::InstanceId;
 use crate::runtime::registry::{RuntimeRegistry, RuntimeState};
 
 /// 上游选择结果：实例内部 SOCKS5 端口（127.0.0.1:40000+id）与实例 id。
