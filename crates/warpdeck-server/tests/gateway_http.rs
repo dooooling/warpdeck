@@ -143,13 +143,28 @@ fn reserve_port() -> u16 {
         .port()
 }
 
-async fn read_available(c: &mut TcpStream) -> String {
-    let mut buf = vec![0u8; 4096];
-    let n = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf))
-        .await
-        .expect("response within timeout")
-        .expect("read response");
-    String::from_utf8_lossy(&buf[..n]).into_owned()
+/// 累积读取直到出现目标内容/对端关闭/超时。
+/// （单次 read 在 Linux 上可能只收到 "UP:" 与载荷的分段。）
+async fn read_until_contains(c: &mut TcpStream, needle: &str, timeout: Duration) -> String {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut acc: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let text = String::from_utf8_lossy(&acc);
+        if text.contains(needle) {
+            return text.into_owned();
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return text.into_owned();
+        }
+        match tokio::time::timeout(remaining, c.read(&mut buf)).await {
+            Ok(Ok(0)) => return text.into_owned(),
+            Ok(Ok(n)) => acc.extend_from_slice(&buf[..n]),
+            Ok(Err(e)) => panic!("read error while waiting for {needle:?}: {e}"),
+            Err(_) => return text.into_owned(),
+        }
+    }
 }
 
 #[tokio::test]
@@ -159,7 +174,7 @@ async fn http_absolute_uri_forwards_via_upstream() {
     c.write_all(b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n")
         .await
         .unwrap();
-    let resp = read_available(&mut c).await;
+    let resp = read_until_contains(&mut c, "UP:", Duration::from_secs(5)).await;
     assert!(
         resp.starts_with("UP:GET http://example.com/path"),
         "request head must be forwarded through upstream, got: {resp:?}"
@@ -173,13 +188,14 @@ async fn http_connect_tunnel_establishes_and_relays() {
     c.write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
         .await
         .unwrap();
-    let resp = read_available(&mut c).await;
+    let resp =
+        read_until_contains(&mut c, "200 Connection Established", Duration::from_secs(5)).await;
     assert!(
         resp.starts_with("HTTP/1.1 200"),
         "CONNECT must be accepted, got: {resp:?}"
     );
     c.write_all(b"ping").await.unwrap();
-    let echoed = read_available(&mut c).await;
+    let echoed = read_until_contains(&mut c, "UP:ping", Duration::from_secs(5)).await;
     assert_eq!(echoed, "UP:ping");
 }
 
@@ -192,7 +208,7 @@ async fn http_basic_auth_missing_gets_407_and_correct_passes() {
     c.write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: x\r\n\r\n")
         .await
         .unwrap();
-    let resp = read_available(&mut c).await;
+    let resp = read_until_contains(&mut c, "407", Duration::from_secs(5)).await;
     assert!(resp.starts_with("HTTP/1.1 407"), "got: {resp:?}");
 
     // 正确凭据（Basic base64("u:p") = dTpw）→ 隧道建立。
@@ -200,6 +216,7 @@ async fn http_basic_auth_missing_gets_407_and_correct_passes() {
     c.write_all(b"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic dTpw\r\n\r\n")
         .await
         .unwrap();
-    let resp = read_available(&mut c).await;
+    let resp =
+        read_until_contains(&mut c, "200 Connection Established", Duration::from_secs(5)).await;
     assert!(resp.starts_with("HTTP/1.1 200"), "got: {resp:?}");
 }
