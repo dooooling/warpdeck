@@ -40,6 +40,39 @@ pub struct AppConfig {
     pub master_key_env: Option<String>,
     /// P8-004：HTTPS 部署下 cookie 加 `Secure` 标志。
     pub secure_cookie: bool,
+    /// P13（DESIGN §35）：代理网关实现选择。默认 gost；builtin 为内置网关
+    /// （Phase A 起可用，迁移期共存）。
+    pub gateway: GatewayKind,
+    /// SOCKS5/HTTP 入站绑定地址（builtin 网关使用；gost 路径沿用渲染常量）。
+    pub socks5_bind: SocketAddr,
+    pub http_bind: SocketAddr,
+}
+
+/// 代理网关实现（DESIGN §35.5）。`WARPDECK_GATEWAY=gost|builtin`。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub enum GatewayKind {
+    #[default]
+    Gost,
+    Builtin,
+}
+
+impl GatewayKind {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "gost" => Ok(GatewayKind::Gost),
+            "builtin" => Ok(GatewayKind::Builtin),
+            other => Err(format!(
+                "invalid WARPDECK_GATEWAY `{other}` (expected gost|builtin)"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GatewayKind::Gost => "gost",
+            GatewayKind::Builtin => "builtin",
+        }
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -127,6 +160,42 @@ impl AppConfig {
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false);
 
+        // P13（DESIGN §35.5）：代理网关实现选择。
+        let gateway = match env("WARPDECK_GATEWAY") {
+            Some(v) if !v.is_empty() => {
+                GatewayKind::parse(&v).map_err(|reason| ConfigError::Invalid {
+                    var: "WARPDECK_GATEWAY",
+                    value: v,
+                    reason,
+                })?
+            }
+            _ => GatewayKind::default(),
+        };
+
+        let socks5_bind = match env("WARPDECK_SOCKS5_BIND") {
+            Some(v) => v.parse::<SocketAddr>().map_err(|_| ConfigError::Invalid {
+                var: "WARPDECK_SOCKS5_BIND",
+                value: v,
+                reason: "not a valid SocketAddr".to_string(),
+            })?,
+            None => SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                SOCKS5_PORT,
+            ),
+        };
+
+        let http_bind = match env("WARPDECK_HTTP_BIND") {
+            Some(v) => v.parse::<SocketAddr>().map_err(|_| ConfigError::Invalid {
+                var: "WARPDECK_HTTP_BIND",
+                value: v,
+                reason: "not a valid SocketAddr".to_string(),
+            })?,
+            None => SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                HTTP_PORT,
+            ),
+        };
+
         Ok(AppConfig {
             web_bind: SocketAddr::new(bind_ip, web_port),
             data_dir,
@@ -136,6 +205,9 @@ impl AppConfig {
             log_level,
             master_key_env,
             secure_cookie,
+            gateway,
+            socks5_bind,
+            http_bind,
         })
     }
 }

@@ -189,10 +189,32 @@ async fn serve(cfg: config::AppConfig) {
     ));
     let gost: Arc<dyn ProxyApplier> = gost_manager.clone();
 
-    // --- reconciler（唯一写者：收敛 desired → actual）---
+    // --- P13（DESIGN §35）：网关实现选择（gost | builtin），迁移期共存 ---
+    // shutdown 通道在此提前创建：builtin 网关监督循环需要它的接收端。
     let trigger = Arc::new(Notify::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let apply_error = warpdeck_server::reconciler::new_apply_error_slot();
+
+    let (gateway, gateway_for_stop): (Arc<dyn ProxyApplier>, Arc<dyn ProxyApplier>) =
+        match cfg.gateway {
+            config::GatewayKind::Builtin => {
+                let g = warpdeck_server::gateway::BuiltinGateway::new(
+                    registry.clone(),
+                    cfg.socks5_bind,
+                    cfg.http_bind,
+                );
+                // builtin 网关监督循环（Phase A：SOCKS5）。
+                let runner = g.clone();
+                let rx = shutdown_rx.clone();
+                tokio::spawn(async move { runner.run(rx).await });
+                (g.clone(), g)
+            }
+            config::GatewayKind::Gost => {
+                let g: Arc<dyn ProxyApplier> = gost_manager.clone();
+                (g.clone(), g)
+            }
+        };
+
     let mut reconciler = Reconciler::new(
         instances.clone(),
         proxy_repo.clone(),
@@ -237,7 +259,7 @@ async fn serve(cfg: config::AppConfig) {
         trigger,
         app_version(),
         consistency.clone(),
-        gost,
+        gateway.clone(),
         apply_error,
     );
     let router = app::router(state, cfg.ui_dir.clone());
@@ -284,7 +306,7 @@ async fn serve(cfg: config::AppConfig) {
     tracing::info!("shutdown: reconciler stopped");
 
     // ④ GOST 数据面。
-    if let Err(e) = gost_manager.stop().await {
+    if let Err(e) = gateway_for_stop.stop().await {
         tracing::warn!(error = %e, "gost stop failed during shutdown");
     }
 
