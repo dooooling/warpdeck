@@ -28,7 +28,9 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: docker-e2e-${{ github.ref }}
+  # P1 审查 R4：与 ci.yml 同模式——同分支 push/PR 共享组互相取消，
+  # 避免同一 commit 的容器构建双跑（每次全矩阵 ≈8 分钟，最贵的 job）。
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
