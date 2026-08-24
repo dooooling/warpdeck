@@ -80,27 +80,50 @@ impl SharedState {
 pub struct BuiltinGateway {
     pub(crate) shared: Arc<SharedState>,
     registry: Arc<RuntimeRegistry>,
+    pool: RoundRobinPool,
     pub(crate) socks5_addr: SocketAddr,
     pub(crate) http_addr: SocketAddr,
 }
 
 impl BuiltinGateway {
+    /// 生产构造：内部端口基址 = FIRST_WARP_PORT（40000）。
     pub fn new(
         registry: Arc<RuntimeRegistry>,
         socks5_addr: SocketAddr,
         http_addr: SocketAddr,
-    ) -> Self {
-        Self {
-            shared: Arc::new(SharedState::default()),
-            registry,
-            socks5_addr,
-            http_addr,
-        }
+    ) -> Arc<Self> {
+        let pool = RoundRobinPool::new(registry.clone());
+        Self::with_pool(registry, pool, socks5_addr, http_addr)
     }
 
-    /// 监督循环：按共享配置维护 listener；bind 失败指数退避；
-    /// apply 变化触发热重建；stop/shutdown 退出。由 main spawn。
-    pub async fn run(self: std::sync::Arc<Self>, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    /// 测试/定制：注入外部池（上游基址可控，指向 fake 上游）。
+    pub fn with_pool(
+        registry: Arc<RuntimeRegistry>,
+        pool: RoundRobinPool,
+        socks5_addr: SocketAddr,
+        http_addr: SocketAddr,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            shared: Arc::new(SharedState::default()),
+            registry,
+            pool,
+            socks5_addr,
+            http_addr,
+        })
+    }
+
+    /// 监督循环（生产入口）。
+    pub async fn run(self: std::sync::Arc<Self>, shutdown: tokio::sync::watch::Receiver<bool>) {
+        self.run_with_ready(shutdown, None).await;
+    }
+
+    /// 监督循环 + 可选的「就绪地址」上报：绑定成功后把实际 listener 地址
+    /// 发给调用方（集成测试用 :0 端口时依赖此通道拿真实端口）。
+    pub async fn run_with_ready(
+        self: std::sync::Arc<Self>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+        mut ready: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
+    ) {
         let backoff = crate::runtime::backoff::ExponentialBackoff::recommended();
         let mut attempt: u32 = 0;
         loop {
@@ -119,53 +142,63 @@ impl BuiltinGateway {
             if !cfg.http_enabled {
                 tracing::debug!(
                     component = "gateway",
+                    http = %self.http_addr,
                     "http inbound not implemented in Phase A"
                 );
-            } else {
-                tracing::debug!(component = "gateway", http = %self.http_addr, "http inbound enabled (Phase B)");
             }
 
-            let pool = RoundRobinPool::new(self.registry.clone());
+            let pool = self.pool.clone();
             let shared = self.shared.clone();
             let cfg_task = cfg.clone();
-            let socks5_addr = self.socks5_addr;
 
-            let socks5_task = tokio::spawn(async move {
-                match tokio::net::TcpListener::bind(socks5_addr).await {
-                    Ok(listener) => {
+            // bind 在监督循环内完成（便于向 ready 上报实际地址）；serve 任务
+            // 仅负责 accept/handler，重建时被 abort 后由下一轮重新 bind。
+            match tokio::net::TcpListener::bind(self.socks5_addr).await {
+                Ok(listener) => {
+                    if let Some(tx) = ready.take() {
+                        let addr = listener.local_addr().unwrap_or(self.socks5_addr);
+                        let _ = tx.send(addr);
+                    }
+                    self.shared.active.store(true, Ordering::SeqCst);
+                    self.shared.set_error(None);
+
+                    let mut serve_task = tokio::spawn(async move {
                         socks5::serve(listener, shared, pool, cfg_task).await;
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            component = "gateway",
-                            addr = %socks5_addr,
-                            error = %e,
-                            "socks5 bind failed"
-                        );
-                        shared.set_error(Some(format!("bind {socks5_addr}: {e}")));
-                    }
-                }
-            });
+                    });
 
-            self.shared.active.store(true, Ordering::SeqCst);
-            self.shared.set_error(None);
-
-            tokio::select! {
-                _ = socks5_task => {
-                    tracing::warn!(component = "gateway", "socks5 listener exited unexpectedly");
+                    tokio::select! {
+                        _ = &mut serve_task => {
+                            tracing::warn!(component = "gateway", "socks5 listener exited unexpectedly");
+                        }
+                        _ = self.shared.wake.notified() => {}
+                        _ = shutdown.changed() => {}
+                    }
+                    // 重建/退出前中止旧 accept 任务（listener 随之 drop）。
+                    serve_task.abort();
+                    let _ = serve_task.await;
                 }
-                _ = self.shared.wake.notified() => {}
-                _ = shutdown.changed() => {}
+                Err(e) => {
+                    let msg = format!("bind {}: {e}", self.socks5_addr);
+                    tracing::error!(component = "gateway", error = %e, "socks5 bind failed");
+                    self.shared.set_error(Some(msg));
+                    // bind 失败退避后用同配置重试。
+                    let d = backoff.delay_for(attempt.saturating_add(1));
+                    attempt = attempt.saturating_add(1).min(8);
+                    tokio::select! {
+                        _ = tokio::time::sleep(d) => {}
+                        _ = self.shared.wake.notified() => {}
+                        _ = shutdown.changed() => break,
+                    }
+                    continue;
+                }
             }
 
             if self.shared.stopped.load(Ordering::SeqCst) {
                 break;
             }
-            // 重建间小退避：避免外部快速抖动导致的 accept 风暴。
-            let d = backoff.delay_for(attempt.saturating_add(1));
-            attempt = attempt.saturating_add(1).min(8);
+            // 配置变化 → 立即重建；正常路径不退避。
+            attempt = 0;
             tokio::select! {
-                _ = tokio::time::sleep(d) => {}
                 _ = self.shared.wake.notified() => {}
                 _ = shutdown.changed() => break,
             }
@@ -279,5 +312,43 @@ fn cidr_match(cidr: &str, ip: std::net::IpAddr) -> bool {
             }
             _ => false,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ct_eq_basic() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn client_allowlist_matches_v4_v6_and_skips_bad_entries() {
+        let ok = vec![
+            "192.168.1.0/24".to_string(),
+            "2001:db8::/32".to_string(),
+            "not-a-cidr".to_string(), // 解析失败跳过
+        ];
+        assert!(client_allowed(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 7)),
+            &ok
+        ));
+        assert!(!client_allowed(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            &ok
+        ));
+        assert!(client_allowed("2001:db8:1234::1".parse().unwrap(), &ok));
+        // host bits 非零的条目解析失败 → 跳过（不 panic）。
+        let bad = vec!["2001:db8::1/64".to_string()];
+        assert!(!client_allowed("2001:db8::1".parse().unwrap(), &bad));
+    }
+
+    #[test]
+    fn empty_allowlist_allows_everything() {
+        assert!(client_allowed("10.1.2.3".parse().unwrap(), &[]));
     }
 }

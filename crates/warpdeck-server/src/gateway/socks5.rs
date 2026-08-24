@@ -58,7 +58,7 @@ pub(crate) async fn serve(
     cfg: GatewayConfig,
 ) {
     loop {
-        let (stream, peer) = match listener.accept().await {
+        let (mut stream, peer) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
                 tracing::debug!(component = "gateway", error = %e, "accept error");
@@ -69,13 +69,13 @@ pub(crate) async fn serve(
         let pool = pool.clone();
         let cfg = cfg.clone();
         tokio::spawn(async move {
-            let _ = handle_conn(stream, peer, shared, pool, cfg).await;
+            let _ = handle_conn(&mut stream, peer, shared, pool, cfg).await;
         });
     }
 }
 
 async fn handle_conn(
-    mut stream: TcpStream,
+    stream: &mut TcpStream,
     peer: SocketAddr,
     shared: Arc<SharedState>,
     pool: RoundRobinPool,
@@ -150,17 +150,14 @@ async fn handle_conn(
 
     // ---- CONNECT 请求 ----
     let mut head = [0u8; 4];
-    if stream.read_exact(&mut head).await.is_err() || head[0] != VER {
-        return;
-    }
-    if head[1] != 0x01 {
+    if stream.read_exact(&mut head).await.is_err() || head[0] != VER || head[1] != 0x01 {
         // 仅支持 CONNECT → 回 CMD not supported(0x07)。
         let _ = stream
             .write_all(&[VER, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
             .await;
         return;
     }
-    let Some(target) = read_target_addr(&mut stream).await else {
+    let Some(target) = read_target_addr(stream, head[3]).await else {
         return;
     };
     let mut port_buf = [0u8; 2];
@@ -198,13 +195,12 @@ async fn handle_conn(
     let _ = stream
         .write_all(&[VER, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
         .await;
-    let _ = tokio::io::copy_bidirectional(&mut stream, &mut up).await;
+    let _ = tokio::io::copy_bidirectional(stream, &mut up).await;
 }
 
-async fn read_target_addr(stream: &mut TcpStream) -> Option<Target> {
-    let mut atyp = [0u8; 1];
-    stream.read_exact(&mut atyp).await.ok()?;
-    match atyp[0] {
+/// ATYP 已在调用方读取（CONNECT 头第 4 字节），此处按类型读地址。
+async fn read_target_addr(stream: &mut TcpStream, atyp: u8) -> Option<Target> {
+    match atyp {
         0x01 => {
             let mut o = [0u8; 4];
             stream.read_exact(&mut o).await.ok()?;
@@ -256,20 +252,8 @@ async fn dial_socks5_connect(
             format!("upstream socks5 connect failed: rep={:#x}", head[1]),
         ));
     }
-    // 消费 BND.ADDR/BND.PORT（warp-svc 回 IPv4 占位）。
-    let skip = match head[3] {
-        0x01 => 6,
-        0x03 => {
-            let mut l = [0u8; 1];
-            up.read_exact(&mut l).await?;
-            l[0] as usize + 2
-        }
-        0x04 => 18,
-        _ => 6,
-    };
-    if skip > 4 {
-        let mut discard = vec![0u8; skip - 4];
-        up.read_exact(&mut discard).await?;
-    }
+    // 消费 BND.ADDR/BND.PORT（warp-svc 回 IPv4 占位，共 6 字节）。
+    let mut discard = [0u8; 6];
+    up.read_exact(&mut discard).await?;
     Ok(up)
 }

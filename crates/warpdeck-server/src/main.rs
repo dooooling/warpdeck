@@ -198,11 +198,11 @@ async fn serve(cfg: config::AppConfig) {
     let (gateway, gateway_for_stop): (Arc<dyn ProxyApplier>, Arc<dyn ProxyApplier>) =
         match cfg.gateway {
             config::GatewayKind::Builtin => {
-                let g = Arc::new(warpdeck_server::gateway::BuiltinGateway::new(
+                let g = warpdeck_server::gateway::BuiltinGateway::new(
                     registry.clone(),
                     cfg.socks5_bind,
                     cfg.http_bind,
-                ));
+                );
                 // builtin 网关监督循环（Phase A：SOCKS5）。
                 let runner = g.clone();
                 let rx = shutdown_rx.clone();
