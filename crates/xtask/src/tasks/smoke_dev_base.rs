@@ -1,7 +1,7 @@
 //! `cargo xtask smoke-dev-base`：dev-base 冒烟（P2-012 / §23.3），替代 smoke-dev-base.ps1。
 //!
 //! 两部分：
-//! - A 组件齐备性（无需特权）：warp-cli/warp-svc/gost/dbus/tini 可执行 + 出网可达；
+//! - A 组件齐备性（无需特权）：warp-cli/warp-svc/dbus/tini 可执行 + 出网可达；
 //! - B 真实数据面（`--full`，需 tun/NET_ADMIN）：免费注册 → mode proxy → connect，
 //!   socks5 trace 期望 `warp=on`（无需 WARP+ license）。
 
@@ -15,7 +15,6 @@ pub struct Args {
 
 const COMPONENTS_SCRIPT: &str = "set -e\n\
   command -v warp-cli && command -v warp-svc\n\
-  gost -V\n\
   dbus-daemon --version\n\
   tini --version | grep -i tini\n\
   echo 'components-ok'";

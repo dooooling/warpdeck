@@ -1,9 +1,11 @@
-//! 日志源与实时日志总线（P10-005/007）。
+//! 日志源与实时日志总线（P10-005/007；P13-C 移除 gost.stderr.log 源）。
 //!
-//! 三类日志源（DESIGN §8.1 `{data_dir}/logs/`）：
+//! 日志源（DESIGN §8.1 `{data_dir}/logs/`）：
 //! - `manager.log`：manager 自身 tracing 输出（`observability::RedactFileLayer`）
 //! - `instance-{id}.log`：warp-svc 进程 stdout/stderr（`SpawnCommand` 重定向）
-//! - `gost.stderr.log`：GOST 进程 stderr（重定向；文件名随 P5 现状保留）
+//!
+//! 内置网关（P13）的日志经结构化 tracing 进 manager.log，不再有独立进程文件。
+//! 升级卷中遗留的 `gost.stderr.log` 不再被枚举/尾随（redactor 规则保留兜底）。
 //!
 //! 实时行经 `LogBus`（broadcast）推给 SSE；发布与历史读取都过中心
 //! redactor（P8，绝不泄漏 secret）。慢订阅者 lagged 丢行可接受（历史在文件）。
@@ -27,11 +29,10 @@ pub struct LogLine {
     pub line: String,
 }
 
-/// 日志源标识（对外字符串契约：`manager` `gost` `instance:{id}`）。
+/// 日志源标识（对外字符串契约：`manager` `instance:{id}`）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogSource {
     Manager,
-    Gost,
     Instance(InstanceId),
 }
 
@@ -40,7 +41,6 @@ impl LogSource {
     pub fn id(&self) -> String {
         match self {
             LogSource::Manager => "manager".to_string(),
-            LogSource::Gost => "gost".to_string(),
             LogSource::Instance(id) => format!("instance:{}", id.as_i64()),
         }
     }
@@ -54,7 +54,6 @@ impl LogSource {
     pub fn file_name(&self) -> &'static str {
         match self {
             LogSource::Manager => "manager.log",
-            LogSource::Gost => "gost.stderr.log",
             LogSource::Instance(_) => "instance-{id}.log",
         }
     }
@@ -63,7 +62,6 @@ impl LogSource {
     pub fn from_file_name(name: &str) -> Option<LogSource> {
         match name {
             "manager.log" => Some(LogSource::Manager),
-            "gost.stderr.log" | "gost.log" => Some(LogSource::Gost),
             other => {
                 let rest = other.strip_prefix("instance-")?.strip_suffix(".log")?;
                 let id = rest.parse::<i64>().ok()?;
@@ -76,7 +74,6 @@ impl LogSource {
     pub fn parse(id: &str) -> Option<LogSource> {
         match id {
             "manager" => Some(LogSource::Manager),
-            "gost" => Some(LogSource::Gost),
             other => {
                 let rest = other.strip_prefix("instance:")?;
                 let id = rest.parse::<i64>().ok()?;
@@ -107,19 +104,13 @@ impl LogSourceFile {
     }
 }
 
-/// 枚举可用日志源：固定 manager/gost + 磁盘上已存在的 instance-*.log。
+/// 枚举可用日志源：固定 manager + 磁盘上已存在的 instance-*.log。
 pub fn enumerate_sources(data_dir: &Path) -> Vec<LogSourceFile> {
     let dir = logs_dir(data_dir);
-    let mut out = vec![
-        LogSourceFile {
-            source: LogSource::Manager,
-            path: dir.join("manager.log"),
-        },
-        LogSourceFile {
-            source: LogSource::Gost,
-            path: dir.join("gost.stderr.log"),
-        },
-    ];
+    let mut out = vec![LogSourceFile {
+        source: LogSource::Manager,
+        path: dir.join("manager.log"),
+    }];
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let mut instances: Vec<_> = entries
             .filter_map(|e| e.ok())
@@ -279,7 +270,6 @@ mod tests {
     #[test]
     fn log_source_ids_are_stable() {
         assert_eq!(LogSource::Manager.id(), "manager");
-        assert_eq!(LogSource::Gost.id(), "gost");
         assert_eq!(
             LogSource::Instance(InstanceId::from_db(0).unwrap()).id(),
             "instance:0"
@@ -290,11 +280,12 @@ mod tests {
     fn log_source_parse_roundtrip() {
         for s in [
             LogSource::Manager,
-            LogSource::Gost,
             LogSource::Instance(InstanceId::from_db(12).unwrap()),
         ] {
             assert_eq!(LogSource::parse(&s.id()), Some(s));
         }
+        // P13-C：gost 源已随 GOST 移除，旧 id 不再可解析。
+        assert_eq!(LogSource::parse("gost"), None);
         assert_eq!(LogSource::parse("instance:-1"), None);
         assert_eq!(LogSource::parse("nope"), None);
     }
@@ -321,8 +312,8 @@ mod tests {
         std::fs::write(logs.join("instance-10.log"), "x").unwrap();
         let sources = enumerate_sources(dir.path());
         let ids: Vec<_> = sources.iter().map(|s| s.source.id()).collect();
-        assert_eq!(ids, vec!["manager", "gost", "instance:1", "instance:10"]);
-        assert_eq!(sources[2].path, logs.join("instance-1.log"));
+        assert_eq!(ids, vec!["manager", "instance:1", "instance:10"]);
+        assert_eq!(sources[1].path, logs.join("instance-1.log"));
     }
 
     #[test]
@@ -330,12 +321,12 @@ mod tests {
         let bus = LogBus::default();
         let mut rx = bus.subscribe();
         bus.publish(LogLine {
-            source: LogSource::Gost,
+            source: LogSource::Manager,
             seq: 1,
             line: "hi".into(),
         });
         let got = rx.try_recv().unwrap();
-        assert_eq!(got.source, LogSource::Gost);
+        assert_eq!(got.source, LogSource::Manager);
         assert_eq!(got.seq, 1);
         assert_eq!(got.line, "hi");
     }

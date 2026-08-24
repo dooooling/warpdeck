@@ -9,7 +9,8 @@
 //!   3 http        18081 -> trace warp=on（P11-009）
 //!   4 persistence 3 实例 + 代理认证 -> restart -> 全部恢复（P11-010）
 //!   5 failure     kill 一个 warp-svc -> 池收缩仍可用 -> auto-restart（P11-011）
-//!   6 gost        kill gost -> reconciler 重建（P11-012）
+//!   6 gateway     注入网关任务 panic（SIGUSR1）-> 监督重启 -> 恢复
+//!                 （P13-004；需 compose 直通 WARPDECK_GATEWAY_TEST_HOOKS=1）
 //!   7 no-leak     停全部实例 -> 代理必须失败（P11-013）
 //!   8 profiles    多账号档案 CRUD/绑定/改绑/删除保护；ZT 需真实凭据
 //!                 （env: WARP_E2E_ZT_ORG / WARP_E2E_ZT_CLIENT_ID / WARP_E2E_ZT_CLIENT_SECRET，
@@ -36,7 +37,7 @@ const PORT_SOCKS: u16 = 11081;
 const PORT_HTTP: u16 = 18081;
 const ADMIN_USER: &str = "e2e-admin";
 const ADMIN_PASS: &str = "e2e-password-123";
-// 认证在 E2E-04 才开启；此前 GOST 忽略 proxy-user，带上无副作用。
+// 认证在 E2E-04 才开启；此前网关拒绝匿名会话，带上凭据无副作用。
 const PROXY_AUTH: &str = "e2e-proxy-user:e2e-proxy-pass-123";
 
 pub struct Args {
@@ -232,7 +233,7 @@ fn wait_container_healthy(timeout_secs: u64) -> Result<()> {
     )
 }
 
-/// 容器健康 ≠ GOST 已监听：等 TCP 可连（与服务端 apply→probe 语义一致），
+/// 容器健康 ≠ 网关已监听：等 TCP 可连（与服务端 apply 语义一致），
 /// 防 E2E-04 竞态。
 fn wait_proxy_listeners(timeout_secs: u64) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
@@ -281,7 +282,7 @@ fn get_trace(proto: &str, timeout_secs: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// 数据面有界重试（~60s）：reconciler 启动期会以期望配置重启一次 GOST，
+/// 数据面有界重试（~60s）：reconciler 启动期会以期望配置 apply 一次网关，
 /// 存在 accept 后 EOF 的窗口，勿把重启窗口误判为故障。
 fn assert_warp_on(proto: &str) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -382,6 +383,9 @@ pub fn run(args: &Args) -> Result<()> {
     println!(
         "== E2E setup ({PROJECT}, image={IMAGE}, ports {PORT_WEB}/{PORT_SOCKS}/{PORT_HTTP}) =="
     );
+    // P13-004：E2E-06 需要网关测试钩子（SIGUSR1 注入 serve 任务 panic）。
+    // 进程 env 直通 compose environment（compose.yml 以 ${VAR:-} 引用）。
+    std::env::set_var("WARPDECK_GATEWAY_TEST_HOOKS", "1");
     if args.no_fresh {
         println!("  (reuse existing environment)");
     } else {
@@ -466,7 +470,7 @@ pub fn run(args: &Args) -> Result<()> {
             )?;
         }
         wait_proxy_listeners(90)?;
-        // 有界重试而非单发：实例全 healthy ≠ GOST 新配置 apply 完成，存在
+        // 有界重试而非单发：实例全 healthy ≠ 网关新配置 apply 完成，存在
         // 「监听已开、转发链未就绪」的窗口（CI 时序比本地更易踩中）。
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut trace = String::new();
@@ -552,10 +556,13 @@ pub fn run(args: &Args) -> Result<()> {
 
     // ---------- E2E-06 ----------
     if has(6) {
-        println!("== E2E-06 kill gost -> reconciler restart -> trace recovers ==");
+        println!("== E2E-06 gateway task panic -> supervised restart -> trace recovers ==");
         ensure_healthy_instance(&mut e2e, &mut ids)?;
         ensure_authenticated_proxy(&mut e2e)?;
         let container = format!("{PROJECT}-warpdeck-1");
+        // P13-004：builtin 网关无外部进程可杀；等价故障面 = serve 任务 panic。
+        // 测试钩子（WARPDECK_GATEWAY_TEST_HOOKS=1）把 SIGUSR1 转成 socks5
+        // serve 任务内的 panic；监督循环应捕获并按退避重建 listener。
         common::run(
             "docker",
             &[
@@ -563,10 +570,11 @@ pub fn run(args: &Args) -> Result<()> {
                 container,
                 "bash".into(),
                 "-c".into(),
-                "pkill -9 -f 'gost -C'".into(),
+                "kill -USR1 1".into(),
             ],
         )?;
-        assert("gost killed inside container", true)?;
+        assert("SIGUSR1 fault injected into gateway (pid 1 via tini)", true)?;
+        // 恢复窗口内请求可能失败（fail-closed，允许）；有界轮询到 warp=on。
         let mut ok = false;
         for _ in 0..15 {
             std::thread::sleep(Duration::from_secs(6));
@@ -578,10 +586,10 @@ pub fn run(args: &Args) -> Result<()> {
             }
         }
         assert(
-            "gost auto-recovered (reconciler restart + listener probe)",
+            "gateway auto-recovered (supervised task restart + listener rebuild)",
             ok,
         )?;
-        results.push("PASS E2E-06 gost failure".into());
+        results.push("PASS E2E-06 gateway failure".into());
     }
 
     // ---------- E2E-07 ----------

@@ -54,7 +54,7 @@ export interface PatchInstanceRequest {
   account_profile_id: number | null
 }
 
-/** GOST 数据面实际状态（P1 审查 #4：desired ≠ actual 必须可见）。 */
+/** 代理数据面实际状态（P1 审查 #4：desired ≠ actual 必须可见）。 */
 export interface ProxyActual {
   status: 'running' | 'stopped' | 'degraded' | 'failed'
   pid?: number
@@ -71,7 +71,7 @@ export interface ProxyConfigView {
   allowed_ips: string[]
   max_connections: number | null
   max_rps: number | null
-  /** GOST 实际状态（后端未追踪时缺省）。 */
+  /** 网关实际状态（后端未追踪时缺省）。 */
   actual?: ProxyActual
 }
 
@@ -175,7 +175,7 @@ export interface ApiErrorBody {
 
 export interface LogSourceView {
   source: string
-  kind: 'manager' | 'gost' | 'instance'
+  kind: 'manager' | 'instance'
   instance_id: number | null
   exists: boolean
 }

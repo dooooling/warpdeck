@@ -9,7 +9,7 @@
 //! - Failed + auto_restart=false → 不重启；
 //! - 删除 DB 行 → registry 孤儿被停止并移除；
 //! - 启动失败 → 记录 backoff，指数翻倍，到期后重试；
-//! - proxy_config → ProxyApplier 收到对应 GostSettings；
+//! - proxy_config → ProxyApplier 收到对应 ProxySettings；
 //! - 单实例失败不阻塞其他实例启动；
 //! - §11.3 批量：DB 3 个 running → 一轮全部 start；
 //! - §11.3 幂等：连续 10 轮不重复创建进程；
@@ -30,8 +30,8 @@ use crate::db::repo::{
     SqliteWarpInstanceRepository, WarpInstanceRepository, WarpInstanceSpec,
 };
 use crate::db::{cleanup_temp_db, temp_db_url};
-use crate::proxy::{GostSettings, ProxyAuth};
 use crate::reconciler::{ProxyApplier, Reconciler, DEFAULT_BACKOFF_BASE, DEFAULT_BACKOFF_MAX};
+use crate::reconciler::{ProxyAuth, ProxySettings};
 use crate::runtime::clock::Clock;
 use crate::runtime::events::EventBus;
 use crate::runtime::fake::{FakeWarpRuntime, ManualClock};
@@ -41,15 +41,15 @@ use crate::runtime::registry::{RuntimeRegistry, RuntimeState};
 /// 记录每次 apply 的代理配置 + 可注入失败。
 #[derive(Default)]
 struct FakeProxyApplier {
-    applied: std::sync::Mutex<Vec<GostSettings>>,
+    applied: std::sync::Mutex<Vec<ProxySettings>>,
     fail_next: std::sync::atomic::AtomicBool,
-    /// stop() 调用次数（P1 审查 #4：全关 listener 必须显式停 GOST）。
+    /// stop() 调用次数（P1 审查 #4：全关 listener 必须显式停网关）。
     stops: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
 impl ProxyApplier for FakeProxyApplier {
-    async fn apply_config(&self, settings: &GostSettings) -> Result<(), String> {
+    async fn apply_config(&self, settings: &ProxySettings) -> Result<(), String> {
         if self
             .fail_next
             .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -563,7 +563,7 @@ async fn one_failure_does_not_block_others() {
 }
 
 #[tokio::test]
-async fn proxy_config_maps_to_gost_settings_and_applies() {
+async fn proxy_config_maps_to_settings_and_applies() {
     let env = TestEnv::new().await;
     let default_cfg = env.proxy_repo.get().await.unwrap();
 
@@ -601,7 +601,7 @@ async fn proxy_config_update_is_reflected() {
 
     let applied = env.proxy.applied.lock().unwrap().clone();
     assert_eq!(applied.len(), 1);
-    let expected = GostSettings {
+    let expected = ProxySettings {
         socks5_enabled: false,
         http_enabled: true,
         auth: Some(ProxyAuth {
@@ -628,7 +628,7 @@ async fn proxy_config_update_is_reflected() {
 }
 
 /// P0 审查 #2（fail-closed）：auth_enabled=true 但密码缺失时，绝不应用
-/// `auth: None` 的匿名配置——跳过本次 apply，保留 GOST 当前已验证配置。
+/// `auth: None` 的匿名配置——跳过本次 apply，保留网关当前已验证配置。
 #[tokio::test]
 async fn proxy_auth_enabled_without_password_skips_apply_fail_closed() {
     let env = TestEnv::new().await;
@@ -643,7 +643,7 @@ async fn proxy_auth_enabled_without_password_skips_apply_fail_closed() {
 
     assert!(
         env.proxy.applied.lock().unwrap().is_empty(),
-        "fail-closed: password missing → no config applied, GOST stays on last safe state"
+        "fail-closed: password missing → no config applied, gateway stays on last safe state"
     );
 }
 
@@ -743,10 +743,10 @@ async fn queued_restart_commands_coalesce_into_next_start() {
     assert_eq!(after.observed_restart_generation, 2, "追平到最新代数");
 }
 
-/// P1 审查 #3/#4：两个 listener 全关 → 显式 stop GOST（而非 apply 全关配置
-/// ——GostConfig 本就拒绝渲染），且 apply_error 槽位保持干净。
+/// P1 审查 #3/#4：两个 listener 全关 → 显式 stop 网关（而非 apply 全关
+/// 配置），且 apply_error 槽位保持干净。
 #[tokio::test]
-async fn proxy_both_listeners_disabled_stops_gost() {
+async fn proxy_both_listeners_disabled_stops_gateway() {
     let env = TestEnv::new().await;
     let cfg = ProxyConfig {
         socks5_enabled: false,
@@ -780,11 +780,11 @@ async fn proxy_both_listeners_disabled_stops_gost() {
     assert_eq!(
         env.proxy.stops.load(std::sync::atomic::Ordering::SeqCst),
         1,
-        "全关 listener 必须显式停 GOST"
+        "全关 listener 必须显式停网关"
     );
     assert!(
         env.proxy.applied.lock().unwrap().is_empty(),
-        "全关时不得调用 apply（GostConfig 拒绝无 listener 渲染）"
+        "全关时不得调用 apply（网关无 listener 可渲染）"
     );
 }
 

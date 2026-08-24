@@ -1,7 +1,7 @@
 //! 应用壳：路由组合（§6.3 `app.rs`）与集成测试辅助（P1-010 Test Harness）。
 //!
 //! P7 起 `router(state)` 接受 `ApiState`（trait 接缝注入）；生产由 `main`
-//! 组装真实栈（sqlite + InstanceManager + GostManager），测试用 `TestApp`
+//! 组装真实栈（sqlite + InstanceManager + builtin 网关），测试用 `TestApp`
 //! 组装 fake 栈（FakeWarpRuntime + 真实临时 sqlite），API 测试无需真实 WARP
 //! （DEVELOPMENT_PLAN §12.4/§12.5 gate）。
 //!
@@ -192,7 +192,7 @@ fn api_not_found(method: &str, path: &str, request_id: &str) -> axum::response::
         .into_response()
 }
 
-/// 测试用 GOST 桩（P1 审查 #4）：可注入 actual 状态、记录 stop/apply。
+/// 测试用网关桩（P1 审查 #4）：可注入 actual 状态、记录 stop/apply。
 #[derive(Default)]
 pub struct FakeProxyRuntime {
     inner: std::sync::Mutex<FakeProxyRuntimeInner>,
@@ -200,14 +200,14 @@ pub struct FakeProxyRuntime {
 
 #[derive(Default)]
 struct FakeProxyRuntimeInner {
-    status: Option<crate::proxy::ProxyStatus>,
+    status: Option<crate::reconciler::ProxyStatus>,
     stops: usize,
-    applies: Vec<crate::proxy::GostSettings>,
+    applies: Vec<crate::reconciler::ProxySettings>,
 }
 
 impl FakeProxyRuntime {
     #[doc(hidden)]
-    pub fn set_status(&self, status: Option<crate::proxy::ProxyStatus>) {
+    pub fn set_status(&self, status: Option<crate::reconciler::ProxyStatus>) {
         self.inner.lock().unwrap().status = status;
     }
 
@@ -219,19 +219,22 @@ impl FakeProxyRuntime {
 
 #[async_trait::async_trait]
 impl crate::reconciler::ProxyApplier for FakeProxyRuntime {
-    async fn apply_config(&self, settings: &crate::proxy::GostSettings) -> Result<(), String> {
+    async fn apply_config(
+        &self,
+        settings: &crate::reconciler::ProxySettings,
+    ) -> Result<(), String> {
         self.inner.lock().unwrap().applies.push(settings.clone());
         Ok(())
     }
 
-    async fn status(&self) -> Option<crate::proxy::ProxyStatus> {
+    async fn status(&self) -> Option<crate::reconciler::ProxyStatus> {
         self.inner.lock().unwrap().status.clone()
     }
 
     async fn stop(&self) -> Result<(), String> {
         self.inner.lock().unwrap().stops += 1;
         let mut inner = self.inner.lock().unwrap();
-        inner.status = Some(crate::proxy::ProxyStatus::Stopped);
+        inner.status = Some(crate::reconciler::ProxyStatus::Stopped);
         drop(inner);
         Ok(())
     }
@@ -246,8 +249,8 @@ pub struct TestApp {
     state: ApiState,
     /// fake runtime（动作断言用）。
     runtime: Arc<FakeWarpRuntime>,
-    /// fake GOST（actual 状态/stop 断言用，P1 审查 #4）。
-    gost: std::sync::Arc<FakeProxyRuntime>,
+    /// fake 网关（actual 状态/stop 断言用，P1 审查 #4）。
+    proxy: std::sync::Arc<FakeProxyRuntime>,
     /// Web UI 静态目录（临时目录 + 占位 index.html）。
     ui: tempfile::TempDir,
     /// 持久化数据目录（临时目录；日志源枚举/历史测试）。
@@ -280,7 +283,7 @@ impl TestApp {
         // 日志源枚举/历史测试需要独立 data dir（与 SQLite 临时库同生命周期）。
         let data = tempfile::tempdir().expect("failed to create data temp dir");
         let data_dir_path = data.path().to_path_buf();
-        let gost = std::sync::Arc::new(FakeProxyRuntime::default());
+        let proxy = std::sync::Arc::new(FakeProxyRuntime::default());
         let state = ApiState::new(
             db::repo::instance_repo(pool.clone()),
             Arc::new(db::repo::SqliteProxyConfigRepository::new(pool.clone())),
@@ -301,7 +304,7 @@ impl TestApp {
             Arc::new(Notify::new()),
             env!("CARGO_PKG_VERSION").to_string(),
             Arc::new(crate::db::uow::ConsistencyService::new(pool.clone(), key)),
-            gost.clone(),
+            proxy.clone(),
             crate::reconciler::new_apply_error_slot(),
         );
         let ui = tempfile::tempdir().expect("failed to create ui temp dir");
@@ -315,7 +318,7 @@ impl TestApp {
             db_path,
             state,
             runtime,
-            gost,
+            proxy,
             ui,
             data,
             session_id: None,
@@ -479,9 +482,9 @@ impl TestApp {
         self.runtime.clone()
     }
 
-    /// fake GOST 桩（actual 状态注入 / stop 计数断言，P1 审查 #4）。
-    pub fn gost(&self) -> std::sync::Arc<FakeProxyRuntime> {
-        self.gost.clone()
+    /// fake 网关桩（actual 状态注入 / stop 计数断言，P1 审查 #4）。
+    pub fn proxy(&self) -> std::sync::Arc<FakeProxyRuntime> {
+        self.proxy.clone()
     }
 
     /// 直查测试 DB（期望侧字段断言用，如 restart 命令代数）。

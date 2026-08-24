@@ -179,7 +179,7 @@ const en = {
     listeners: 'Listeners',
     listenersHint:
       'Ports below are the in-container listeners. Host port mapping is managed by Docker Compose .env — edit it there, not here.',
-    actualStatus: 'GOST actual status',
+    actualStatus: 'Gateway actual status',
     lastApplyError: 'Last proxy apply error',
     settings: 'Settings',
     socks5: 'SOCKS5',

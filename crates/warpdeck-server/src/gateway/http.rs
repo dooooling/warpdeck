@@ -95,6 +95,22 @@ async fn handle_conn(
         }
     }
 
+    // ---- 连接/RPS 限流（DESIGN §35.2：allowlist → 认证 → conn-limit）----
+    // 超限回 503；许可持有到会话结束。
+    let _permit = match cfg.limits.as_deref() {
+        Some(limits) => match limits.acquire() {
+            Ok(permit) => Some(permit),
+            Err(rejection) => {
+                tracing::debug!(component = "gateway", %peer, ?rejection, "session rejected by limits");
+                let _ = stream
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+                    .await;
+                return;
+            }
+        },
+        None => None,
+    };
+
     // 解析请求行。
     let first_line = request_head.lines().next().unwrap_or("");
     let is_connect = first_line.starts_with("CONNECT ");

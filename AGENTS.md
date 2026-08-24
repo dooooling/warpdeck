@@ -22,9 +22,9 @@
 
 - **Never use repeated `docker build` as the dev/test loop.** Normal work: `cargo run`/`cargo test` + fixed dev-base image `warpdeck-dev-base:1` (bind-mount the built binary) + fake runtimes. Docker E2E (`docker build -t warpdeck:e2e .`) only for candidate integrations.
 - Never run `docker system prune -a --volumes` in test scripts.
-- PR CI always builds the image and runs the E2E-01 smoke (single-instance closed loop, 1 WARP registration). Full E2E matrix (1..=8) additionally triggers on path changes: `Dockerfile*`, `docker/**`, `compose*.yml`, WARP/GOST install, listener/bootstrap code. Rationale: the image is the shipping artifact; registration frequency vs Cloudflare is the only reason the full matrix is not run on every PR.
+- PR CI always builds the image and runs the E2E-01 smoke (single-instance closed loop, 1 WARP registration). Full E2E matrix (1..=8) additionally triggers on path changes: `Dockerfile*`, `docker/**`, `compose*.yml`, WARP install, listener/bootstrap code. Rationale: the image is the shipping artifact; registration frequency vs Cloudflare is the only reason the full matrix is not run on every PR.
 - Domain code must not hardcode `Command::new("warp-cli")`: go through `WarpControl` trait + `ProcessSpawner`/`Clock`/`BackoffPolicy` traits with Fake implementations, so ≥80% of tests run without real WARP.
-- Order: single instance lifecycle first, then multi-instance, then health, then GOST, then persistence/reconciler, then API/auth/UI.
+- Order: single instance lifecycle first, then multi-instance, then health, then GOST, then persistence/reconciler, then API/auth/UI. (2026-08-24: GOST retired — builtin in-process gateway is the only proxy path, DESIGN §35 / P13.)
 - `warp-cli` commands: `Command::new` + `.arg` (no shell string concat), timeout, capture stderr, typed errors. Port calculation centralized via typed `InstanceId`/`InternalProxyPort` with `u16` overflow checks.
 
 ## Commands (once code exists)
@@ -36,7 +36,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 
 # Build entry points (replaced scripts/*.ps1 orchestration layer; 2026-08-21)
-# GOST/WARP deps download in-image via docker/fetch-deps.sh (cache mount + forced sha256),
+# WARP deps download in-image via docker/fetch-deps.sh (cache mount + forced sha256),
 # single source = crates/xtask/src/versions.json (Dockerfiles COPY it from the build
 # context and parse with jq — no --build-arg copies); CN network adds --proxy socks5h://host.docker.internal:10808
 cargo xtask release                 # release image (default tag warpdeck:local)
@@ -56,4 +56,4 @@ curl --socks5-hostname 127.0.0.1:11080 https://cloudflare.com/cdn-cgi/trace   # 
 curl -x http://127.0.0.1:18080 https://cloudflare.com/cdn-cgi/trace           # expect warp=on
 ```
 
-Health states: `Healthy` (requires real data-plane probe with `warp=on`, not just PID alive), `Degraded` (transient), `Failed` (consecutive threshold). GOST applies config via render-temp → validate → atomic rename → restart → probe listeners; apply failure must be surfaced to the UI, never faked as success.
+Health states: `Healthy` (requires real data-plane probe with `warp=on`, not just PID alive), `Degraded` (transient), `Failed` (consecutive threshold). The builtin gateway (P13-C, sole proxy path) applies config in-process (hot rebuild, supervised restart on panic); apply failure must be surfaced to the UI, never faked as success.

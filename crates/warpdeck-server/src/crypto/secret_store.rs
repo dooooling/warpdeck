@@ -74,7 +74,7 @@ pub trait SecretStore: Send + Sync {
     async fn exists(&self, kind: SecretKind) -> Result<bool, SecretStoreError>;
     /// 删除（清空）。
     async fn delete(&self, kind: SecretKind) -> Result<(), SecretStoreError>;
-    /// 解密读取（仅内部应用路径用：GOST 渲染/注册流；禁止进入 API 响应）。
+    /// 解密读取（仅内部应用路径用：网关配置注入/注册流；禁止进入 API 响应）。
     async fn get_plaintext(&self, kind: SecretKind) -> Result<Option<String>, SecretStoreError>;
 
     /// 档案级 secret（v0.2 §16.9）：`profile_id` 非 NULL，upsert 受

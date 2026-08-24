@@ -1,9 +1,9 @@
 //! 日志历史 API（P10-006）。
 //!
-//! - `GET /api/v1/logs/sources`：可用日志源枚举（manager / gost / 已有实例）。
+//! - `GET /api/v1/logs/sources`：可用日志源枚举（manager / 已有实例）。
 //! - `GET /api/v1/logs?source=&limit=&offset=`：tail 分页读取历史行。
 //!
-//! 脱敏（DESIGN §25.11 / §27.2）：instance/gost 是非结构化进程输出，
+//! 脱敏（DESIGN §25.11 / §27.2）：instance 是非结构化进程输出，
 //! 行经中心 redactor 整行 scrub；manager 行为结构化 tracing（字段级
 //! `Sensitive` 已在日志点保证），原样返回。
 
@@ -22,9 +22,9 @@ const MAX_PAGE_SIZE: usize = 500;
 /// 日志源视图（sources 端点）。
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct LogSourceView {
-    /// 稳定 id：`manager` `gost` `instance:{id}`。
+    /// 稳定 id：`manager` `instance:{id}`。
     pub source: String,
-    /// 类别：`manager` / `gost` / `instance`。
+    /// 类别：`manager` / `instance`。
     pub kind: &'static str,
     /// 实例 id（仅 kind=instance）。
     pub instance_id: Option<i64>,
@@ -40,7 +40,6 @@ pub async fn sources(State(state): State<ApiState>) -> ApiResult<Json<Vec<LogSou
         .map(|entry| {
             let (kind, instance_id) = match &entry.source {
                 LogSource::Manager => ("manager", None),
-                LogSource::Gost => ("gost", None),
                 LogSource::Instance(id) => ("instance", Some(id.as_i64())),
             };
             LogSourceView {
@@ -57,7 +56,7 @@ pub async fn sources(State(state): State<ApiState>) -> ApiResult<Json<Vec<LogSou
 /// 历史页查询参数。
 #[derive(Debug, Deserialize)]
 pub struct HistoryQuery {
-    /// 日志源 id（`manager` / `gost` / `instance:{id}`）。
+    /// 日志源 id（`manager` / `instance:{id}`）。
     pub source: String,
     /// 每页行数（默认 200，上限 500）。
     #[serde(default = "default_limit")]
@@ -88,7 +87,6 @@ fn resolve_source(state: &ApiState, id: &str) -> Result<std::path::PathBuf, ApiE
     let dir = logs::logs_dir(&state.data_dir);
     Ok(match source {
         LogSource::Manager => dir.join("manager.log"),
-        LogSource::Gost => dir.join("gost.stderr.log"),
         LogSource::Instance(instance_id) => {
             dir.join(format!("instance-{}.log", instance_id.as_i64()))
         }

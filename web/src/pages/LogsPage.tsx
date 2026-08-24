@@ -1,5 +1,5 @@
 // Logs 页（P10-006/007 / DESIGN §19.7）：
-// 运行时日志：源选择（manager/gost/instance:*）+ 历史分页 + 实时流（log.line）。
+// 运行时日志：源选择（manager/instance:*）+ 历史分页 + 实时流（log.line）。
 // 展示区占满页面高度，支持级别着色与换行/不换行切换。
 
 import { useEffect, useRef, useState } from 'react'

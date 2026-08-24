@@ -442,7 +442,7 @@ async fn ensure_warp_plus_bindable(
     Ok(())
 }
 
-/// 代理期望配置（proxy_config 单行 → GostSettings 的中间形态；P6 只读）。
+/// 代理期望配置（proxy_config 单行 → ProxySettings 的中间形态；P6 只读）。
 ///
 /// auth 的密码在 P8 前不落库（`proxy_password_secret_id` 恒 NULL），
 /// `auth_enabled = true` 且无 secret id 时按"未配置"处理：渲染时不启用 auth。

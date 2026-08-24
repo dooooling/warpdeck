@@ -58,6 +58,15 @@ pub(crate) async fn serve(
     cfg: GatewayConfig,
 ) {
     loop {
+        // 测试钩子（P13-004）：请求注入时在本 serve 任务内 panic——
+        // 监督循环捕获 JoinError 后重建 listener，服务恢复。
+        if shared.take_panic_request() {
+            tracing::warn!(
+                component = "gateway",
+                "injected fault: panicking socks5 serve task"
+            );
+            panic!("gateway fault injected (SIGUSR1 test hook)");
+        }
         let (mut stream, peer) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
@@ -148,6 +157,19 @@ async fn handle_conn(
         let _ = stream.write_all(&[SUBNEG_VER, 0x00]).await;
     }
 
+    // ---- 连接/RPS 限流（DESIGN §35.2：allowlist → 认证 → conn-limit）----
+    // 许可持有到会话结束；超限直接关闭（不回 SOCKS5 错误码，避免给扫描器反馈）。
+    let _permit = match cfg.limits.as_deref() {
+        Some(limits) => match limits.acquire() {
+            Ok(permit) => Some(permit),
+            Err(rejection) => {
+                tracing::debug!(component = "gateway", %peer, ?rejection, "session rejected by limits");
+                return;
+            }
+        },
+        None => None,
+    };
+
     // ---- CONNECT 请求 ----
     let mut head = [0u8; 4];
     if stream.read_exact(&mut head).await.is_err() || head[0] != VER || head[1] != 0x01 {
@@ -168,7 +190,6 @@ async fn handle_conn(
 
     // ---- 上游选择与连接 ----
     let picked = pool.pick();
-    eprintln!("[gw] pick = {:?}", picked.as_ref().map(|u| u.addr));
     if picked.is_none() {
         let _ = stream
             .write_all(&[VER, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])

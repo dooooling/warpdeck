@@ -3,12 +3,12 @@
 # WarpDeck dev-base（计划 P2-012 / 设计 §23.3）。
 #
 # 固定开发镜像：只含运行时依赖，不构建产品二进制。
-# 只有本文件、docker/*.sh、OS 包、WARP/GOST 安装逻辑变化才允许重建。
+# 只有本文件、docker/*.sh、OS 包、WARP 安装逻辑变化才允许重建。
 # 后端普通代码变化通过 bind mount Linux binary 后重启容器（§23.3）。
 #
 # 依赖下载：构建期经 docker/fetch-deps.sh 拉取（断点续传 + cache mount + SHA256
 # 硬校验）；中国网络下 --build-arg DL_PROXY=socks5h://host.docker.internal:10808
-# 走宿主代理。GOST/WARP 的 URL/SHA256/版本唯一来源 = crates/xtask/src/versions.json：
+# 走宿主代理。WARP 的 URL/SHA256/版本唯一来源 = crates/xtask/src/versions.json：
 # 直接从 build context COPY 后用 jq 解析（与主 Dockerfile 同机制），不设默认值副本。
 # 脚本入口：`cargo xtask dev-base`。
 
@@ -26,10 +26,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg jq lsb-release dbus tini iproute2
 
-COPY docker/install-warp.sh docker/install-gost.sh docker/fetch-deps.sh /usr/local/bin/
+COPY docker/install-warp.sh docker/fetch-deps.sh /usr/local/bin/
 
-# versions.json 是 GOST/WARP 版本/URL/SHA256 的唯一来源；两个 RUN 都要消费，
-# 故 jq 与该文件都留到最后一个 RUN 才清理。
+# versions.json 是 WARP 版本/URL/SHA256 的唯一来源；jq 在最后一个 RUN 清理。
 COPY crates/xtask/src/versions.json /tmp/versions.json
 
 # 与主 Dockerfile 同款模式：set -eu + jq -er 硬门禁（键缺失/JSON 损坏立即失败，
@@ -42,16 +41,7 @@ RUN --mount=type=cache,target=/dl-cache,sharing=locked \
     && export DL_PROXY WARP_DEB_URL WARP_DEB_SHA256 \
     && bash /usr/local/bin/fetch-deps.sh "${WARP_DEB_URL}" "${WARP_DEB_SHA256}" 60000000 "/dl-cache/${WARP_DEB_URL##*/}" \
     && cp "/dl-cache/${WARP_DEB_URL##*/}" /tmp/cloudflare-warp.deb \
-    && bash /usr/local/bin/install-warp.sh /tmp/cloudflare-warp.deb
-
-RUN --mount=type=cache,target=/dl-cache,sharing=locked \
-    set -eu \
-    && GOST_TARBALL_URL="$(jq -er '.gost.url // error("versions.json: .gost.url missing")' /tmp/versions.json)" \
-    && EXPECTED_GOST_SHA256="$(jq -er '.gost.sha256 // error("versions.json: .gost.sha256 missing")' /tmp/versions.json)" \
-    && GOST_VERSION="$(jq -er '.gost.version // error("versions.json: .gost.version missing")' /tmp/versions.json)" \
-    && export DL_PROXY EXPECTED_GOST_SHA256 GOST_VERSION \
-    && bash /usr/local/bin/fetch-deps.sh "${GOST_TARBALL_URL}" "${EXPECTED_GOST_SHA256}" 9000000 "/dl-cache/${GOST_TARBALL_URL##*/}" \
-    && bash /usr/local/bin/install-gost.sh amd64 "/dl-cache/${GOST_TARBALL_URL##*/}" \
+    && bash /usr/local/bin/install-warp.sh /tmp/cloudflare-warp.deb \
     && useradd -m -s /bin/bash warp \
     && mkdir -p /var/lib/warpdeck /run/warpdeck \
     && chown warp:warp /var/lib/warpdeck /run/warpdeck \
@@ -66,4 +56,4 @@ ENV WARPDECK_RUNTIME_DIR=/run/warpdeck
 # 数据面运行需要：--device /dev/net/tun --cap-add NET_ADMIN（WARP 需建 tun 设备）。
 # CMD 是组件探针（非入口，dev-base 不运行业务进程）；warp-cli status 在 daemon
 # 未启动时输出错误文本但 exit 0——判别请用 cargo xtask smoke-dev-base。
-CMD ["bash", "-c", "warp-cli --accept-tos status; gost -V; dbus-daemon --version"]
+CMD ["bash", "-c", "warp-cli --accept-tos status; dbus-daemon --version"]

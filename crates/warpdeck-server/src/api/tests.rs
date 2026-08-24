@@ -892,7 +892,8 @@ async fn log_sources_are_authenticated_and_enum_existing_files() {
         .map(|s| s["source"].as_str().unwrap())
         .collect();
     assert!(ids.contains(&"manager"));
-    assert!(ids.contains(&"gost"));
+    // P13-C：gost 源已移除（内置网关日志并入 manager.log）。
+    assert!(!ids.contains(&"gost"));
     assert!(ids.contains(&"instance:2"));
     let instance = sources
         .iter()
@@ -989,11 +990,10 @@ async fn log_history_paginates_and_redacts_process_lines() {
     let body = body_json(resp).await;
     assert_eq!(body["error"]["code"], "VALIDATION");
 
-    // 无文件源 → 空页（200，has_more=false）。
+    // 已移除的 gost 源 → 422 VALIDATION（与未知源同语义）。
     let resp = app.request(Method::GET, "/api/v1/logs?source=gost").await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = body_json(resp).await;
-    assert!(!body["has_more"].as_bool().unwrap());
-    assert_eq!(body["lines"].as_array().unwrap().len(), 0);
+    assert_eq!(body["error"]["code"], "VALIDATION");
     app.close().await;
 }

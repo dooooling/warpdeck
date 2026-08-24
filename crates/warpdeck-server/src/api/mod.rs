@@ -77,7 +77,7 @@ pub struct ApiState {
     pub trigger: Arc<Notify>,
     pub started_at: Instant,
     pub version: String,
-    /// P1 审查 #4：GOST 实际状态查询（与 reconciler 共享同一 Arc）。
+    /// P1 审查 #4：网关实际状态查询（与 reconciler 共享同一 Arc；wire 字段名 components.gost 为历史契约，DESIGN §35.5）。
     pub proxy_applier: Arc<dyn crate::reconciler::ProxyApplier>,
     /// P1 审查 R3#4：跨表一致性写服务（secret+配置/档案同事务）。
     pub consistency: Arc<crate::db::uow::ConsistencyService>,

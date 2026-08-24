@@ -3,11 +3,10 @@
 //! 职责（2026-08-22 起，Dockerfile 直接消费 versions.json 后进一步简化）：
 //! - 注入 WARPDECK_VERSION=0.1.0-<git 短 sha>（P12-012）；
 //! - 可选透传 DL_PROXY（中国网络下走宿主代理；CI/海外直连留空）。
-//! - GOST/WARP 的 URL/SHA256/版本不再经 --build-arg 传递：唯一来源
+//! - WARP 的 URL/SHA256/版本不再经 --build-arg 传递：唯一来源
 //!   crates/xtask/src/versions.json 由 Dockerfile 从 build context 直接 COPY + jq 解析。
 //!
-//! 镜像内 fetch-deps.sh 断点续传 + cache mount 持久 + 强制哈希校验；
-//! install-gost.sh 另收 EXPECTED_GOST_SHA256 复核同源取值。
+//! 镜像内 fetch-deps.sh 断点续传 + cache mount 持久 + 强制哈希校验。
 //! P11 预算不变：整个 E2E matrix 复用同一个 tag，禁止每用例重 build。
 
 use anyhow::Result;
@@ -23,9 +22,7 @@ pub struct ReleaseArgs {
 pub fn run(args: &ReleaseArgs) -> Result<()> {
     let v = Versions::load()?;
     println!(
-        "deps pin (consumed in-image from versions.json): gost v{} (sha256 {}) / warp v{} (sha256 {})",
-        v.gost.version,
-        &v.gost.sha256[..12],
+        "deps pin (consumed in-image from versions.json): warp v{} (sha256 {})",
         v.warp.version,
         &v.warp.sha256[..12]
     );
