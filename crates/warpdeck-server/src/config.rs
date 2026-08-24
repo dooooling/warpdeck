@@ -52,8 +52,8 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub enum GatewayKind {
     #[default]
-    Gost,
     Builtin,
+    Gost,
 }
 
 impl GatewayKind {
