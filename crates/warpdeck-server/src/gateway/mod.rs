@@ -8,6 +8,7 @@
 //!
 //! HTTP :18080 入站为 Phase B（DESIGN §35.6）。
 
+pub mod http;
 pub mod pool;
 pub mod socks5;
 
@@ -138,12 +139,18 @@ impl BuiltinGateway {
                 }
             };
 
-            // Phase A 仅 SOCKS5；HTTP 入站为 Phase B。
-            if !cfg.http_enabled {
+            // Phase A 仅 SOCKS5；Phase B 加入 HTTP 入站。
+            if cfg.http_enabled {
                 tracing::debug!(
                     component = "gateway",
                     http = %self.http_addr,
-                    "http inbound not implemented in Phase A"
+                    "http inbound enabled (builtin)"
+                );
+            } else {
+                tracing::debug!(
+                    component = "gateway",
+                    http = %self.http_addr,
+                    "http inbound disabled"
                 );
             }
 
@@ -162,6 +169,24 @@ impl BuiltinGateway {
                     self.shared.active.store(true, Ordering::SeqCst);
                     self.shared.set_error(None);
 
+                    // Phase B：HTTP listener（cfg.http_enabled 控制）。
+                    if cfg.http_enabled {
+                        match tokio::net::TcpListener::bind(self.http_addr).await {
+                            Ok(http_listener) => {
+                                let http_shared = shared.clone();
+                                let http_pool = pool.clone();
+                                let http_cfg = cfg.clone();
+                                tokio::spawn(async move {
+                                    http::serve(http_listener, http_shared, http_pool, http_cfg)
+                                        .await;
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!(component = "gateway", error = %e, "http bind failed");
+                            }
+                        }
+                    }
+
                     let mut serve_task = tokio::spawn(async move {
                         socks5::serve(listener, shared, pool, cfg_task).await;
                     });
@@ -176,6 +201,9 @@ impl BuiltinGateway {
                     // 重建/退出前中止旧 accept 任务（listener 随之 drop）。
                     serve_task.abort();
                     let _ = serve_task.await;
+
+                    // 停止 HTTP listener（如果已启动）。通过 drop TcpListener 实现。
+                    // serve task 被 abort 后，其内部持有的 http listener 也会释放。
                 }
                 Err(e) => {
                     let msg = format!("bind {}: {e}", self.socks5_addr);
