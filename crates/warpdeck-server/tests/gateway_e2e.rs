@@ -12,9 +12,10 @@ use warpdeck_server::proxy::GostSettings;
 use warpdeck_server::reconciler::ProxyApplier;
 use warpdeck_server::runtime::registry::{RuntimeRegistry, RuntimeState};
 
+#[allow(dead_code)]
 struct FakeUpstream {
     addr: SocketAddr,
-    task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<()>, // clippy: never read (fire-and-forget)
 }
 
 async fn spawn_fake_upstream() -> FakeUpstream {

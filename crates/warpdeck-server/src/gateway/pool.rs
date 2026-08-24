@@ -71,6 +71,7 @@ impl RoundRobinPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::instance::InstanceId;
     use crate::runtime::registry::RuntimeState;
 
     #[test]
