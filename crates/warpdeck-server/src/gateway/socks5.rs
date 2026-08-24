@@ -167,15 +167,15 @@ async fn handle_conn(
     let port = u16::from_be_bytes(port_buf);
 
     // ---- 上游选择与连接 ----
-    let Some(upstream_addr) = pool.pick().map(|u| u.addr) else {
-        tracing::debug!(component = "gateway", %peer, "no healthy upstream");
-        // general SOCKS server failure；语义同旧 gost「无健康上游即失败」。
+    let picked = pool.pick();
+    eprintln!("[gw] pick = {:?}", picked.as_ref().map(|u| u.addr));
+    if picked.is_none() {
         let _ = stream
             .write_all(&[VER, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
             .await;
         return;
-    };
-
+    }
+    let upstream_addr = picked.unwrap().addr;
     let mut up = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
         dial_socks5_connect(upstream_addr, &target, port),
@@ -183,7 +183,14 @@ async fn handle_conn(
     .await
     {
         Ok(Ok(s)) => s,
-        _ => {
+        Err(_timeout) => {
+            let _ = stream
+                .write_all(&[VER, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await;
+            return;
+        }
+        Ok(Err(dial_err)) => {
+            tracing::debug!(component = "gateway", error = %dial_err, "upstream dial failed");
             let _ = stream
                 .write_all(&[VER, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                 .await;

@@ -27,8 +27,13 @@ async fn spawn_fake_upstream() -> FakeUpstream {
                 break;
             };
             tokio::spawn(async move {
-                let mut h = [0u8; 2];
-                if s.read_exact(&mut h).await.is_err() {
+                // SOCKS5 greeting: VER(1) + NMETHODS(1) + METHODS(NMETHODS)。
+                let mut vn = [0u8; 2];
+                if s.read_exact(&mut vn).await.is_err() {
+                    return;
+                }
+                let mut methods = vec![0u8; vn[1] as usize];
+                if s.read_exact(&mut methods).await.is_err() {
                     return;
                 }
                 let _ = s.write_all(&[0x05, 0x00]).await;
