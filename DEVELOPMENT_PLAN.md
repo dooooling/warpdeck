@@ -2996,6 +2996,41 @@ P12-012 Version Metadata ✅ —— src/version.rs 统一版本解析（WARPDECK
   （无 git 回退 dev）。
 ```
 
+## Phase 13：内置代理网关（GOST 移除路线）
+
+> 设计依据：DESIGN §35（2026-08-23 立项）。动机与架构详见该章节；本节只列
+> 分期任务与 Gate。迁移期 gost/builtin 双路径共存，`WARPDECK_GATEWAY` env
+> 切换，默认 gost。
+
+### P13-001 Gateway 骨架 + SOCKS5 入站
+
+- `gateway/` 模块：supervised task（panic 捕获 + 指数退避重启，复用 BackoffPolicy）
+- SOCKS5 RFC1928 CONNECT 子集；会话前置 allowlist（复用 parse_cidr，含 IPv6 校验）
+- 健康池：RoundRobinPool 只消费 RuntimeRegistry 中 Healthy 实例
+- Gate：E2E-01..03、07 在 `WARPDECK_GATEWAY=builtin` 下全绿
+
+### P13-002 HTTP 入站 + Basic Auth
+
+- CONNECT 隧道 + absolute-URI 转发；hop-by-hop 头剥离
+- 认证：Argon2id 校验现有 proxy_password secret；失败计数接入限流语义
+- Gate：E2E-04 在 builtin 下全绿
+
+### P13-003 限流 + 默认切换 + GOST 退役
+
+- 全局连接上限 + 可选令牌桶 RPS
+- `WARPDECK_GATEWAY` 默认值切 builtin；删除 GOST 二进制安装、
+  `proxy/config.rs` 渲染层与 supervisor/pool 的 GOST 特化代码
+- Gate：全矩阵 E2E 回归；镜像内不含 gost 二进制；README/docs 同步
+
+### P13-004 E2E-06 语义替换
+
+- 「外部进程崩溃恢复」→「网关任务 panic 注入 → supervised 重启 → 服务恢复」
+
+```text
+P13 进行中状态（随实施更新）：
+P13-000 Design ✅ —— DESIGN §35 定稿（2026-08-23），本节为其计划投影。
+```
+
 ## 17.3 Phase Gate
 
 ```text

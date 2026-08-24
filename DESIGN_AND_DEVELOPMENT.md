@@ -5041,6 +5041,93 @@ WarpDeck 自身代码/文档采用 **MIT License**（见 `LICENSE`）。镜像�
 
 ---
 
+# 35. 内置代理网关（GOST 移除路线）
+
+> 状态：**设计定稿，待分期实施**（2026-08-23 立项）。动机：仓库转公开后，
+> 「单一静态 Rust 二进制 + warp-svc」是最小交付形态；同时消除四轮审查中
+> 反复出问题的 YAML 渲染边界整层。
+
+## 35.1 目标 / 非目标
+
+目标：
+- 进程内实现 SOCKS5(:11080) 与 HTTP(:18080) 入站，替代外部 GOST 二进制
+- 能力对等：多实例 round-robin 健康池、入站认证、IP 白名单、连接/速率限制
+- 复用 RuntimeRegistry 作为上游健康事实来源（优于 GOST 的 TCP 盲探）
+
+非目标：
+- UDP 转发（warp-cli proxy 模式本身仅 TCP SOCKS5）
+- 规则引擎 / 分流 / 订阅（不是 clash）
+- TLS 入站终止（由反向代理层承担，与现状一致）
+
+## 35.2 架构与接线
+
+```text
+client --> :11080 socks5 --+
+                           |-- allowlist -> auth -> conn-limit
+client --> :18080 http  ---+         |
+                                     v
+                     RoundRobinPool(RuntimeRegistry)
+                      只取 state == Healthy 的实例
+                                     |
+                                     v
+              127.0.0.1:40000+id （warp-svc 内部 SOCKS5）
+```
+
+- 只读消费 registry：网关不写任何状态；实例健康由既有 HealthMonitor /
+  CrashWatcher 维护——比 GOST 的 maxFails=1 TCP 探活更准确（Healthy 本身
+  已含 warp=on 数据面验证，AGENTS.md 基线）。
+- 进程模型：网关是 server 进程内的 supervised task。panic 由任务边界捕获，
+  监督循环以指数退避重启（复用 BackoffPolicy）；连续失败超阈值时经
+  ApplyErrorSlot 上浮 degraded（与 GOST Failed 同语义）。这是相对外部进程
+  唯一的隔离性损失，用「崩溃即重启 + 状态上浮」补偿。
+- Reconciler 关系：ProxyApplier trait 不变；新增 BuiltinGateway 实现
+  （apply = 更新内存池配置 + auth/allowlist 热生效），gost 与 builtin 通过
+  env 切换，迁移期共存。
+
+## 35.3 协议范围
+
+| 入站 | 子集 | 说明 |
+|------|------|------|
+| SOCKS5 :11080 | RFC1928 CONNECT；认证子协商 user/pass（启用 auth 时） | 无 UDP ASSOCIATE（上游不支持） |
+| HTTP :18080 | CONNECT 隧道 + absolute-URI 转发 | hop-by-hop 头剥离 |
+
+## 35.4 安全
+
+- 入站认证：用户名 + 密码，密码经 Argon2id 校验现有 secret store 条目；
+  明文仅存在于校验瞬间，日志经 Sensitive/scrub_line 双重保证。
+- IP allowlist：沿用 parse_cidr（含 IPv6 host-bits 校验），会话建立前检查。
+- 限流（Phase C）：全局连接上限 + 可选令牌桶 RPS。
+- 秘密边界不变：YAML 渲染层消失后，「凭据落盘明文」问题类别整体退役。
+
+## 35.5 配置与迁移开关
+
+WARPDECK_GATEWAY=gost|builtin   # 默认 gost（迁移期）；Phase C 默认切 builtin
+
+- API/UI 的 proxy 设置语义两实现完全等价（同一 desired 配置驱动）。
+- /system/status components.gost 字段语义扩展为 gateway 实际状态。
+
+## 35.6 分期计划与 Gate
+
+| Phase | 内容 | Gate |
+|-------|------|------|
+| A | SOCKS5 入站 + 健康池 + allowlist；env 开关共存（默认 gost） | E2E-01..03、07 在 builtin 下全绿 |
+| B | HTTP 入站 + Basic Auth | E2E-04 认证持久化在 builtin 下全绿 |
+| C | 连接/RPS 限流 + 默认切 builtin + 删除 gost 二进制/config.rs/supervisor/pool | 全矩阵回归；镜像不含 gost |
+
+## 35.7 E2E 影响
+
+- E2E-02/03（双协议 warp=on）、07（无直连泄漏）为每期必跑核心。
+- E2E-06 语义变化：GOST 外部进程崩溃场景 → builtin 下改为「网关任务 panic
+  注入 → supervised 重启 → 服务恢复」，验证监督循环而非进程拉起。
+- E2E-05（实例击杀池缩）语义不变，且因健康源更准而更可靠。
+
+## 35.8 回退策略
+
+Phase C 合并前：WARPDECK_GATEWAY=gost 一键回退，零代码回滚。
+Phase C 之后：git revert 整段提交。
+
+---
+
 # 34. 推荐的第一批 Issue
 
 如果你现在开一个新 GitHub 仓库，我建议立即创建这些 Issue。
