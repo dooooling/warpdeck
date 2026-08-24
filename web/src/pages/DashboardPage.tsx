@@ -24,7 +24,7 @@ export function DashboardPage() {
   }
   const counts = status.data.instances
   const runningInstances = instances.data ?? []
-  // P1 审查 #4：优先展示 GOST 实际状态；后端未追踪时退回期望推断。
+  // P1 审查 #4：优先展示网关实际状态（wire 字段名 gost 为历史契约）；后端未追踪时退回期望推断。
   const gost = proxy.data?.actual
   const proxyStatus =
     proxy.data === undefined

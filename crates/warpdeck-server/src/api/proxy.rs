@@ -3,7 +3,7 @@
 //! 设计：`GET` 不返回任何 secret（`proxy_username` 明文不出现，只给
 //! `auth_configured` 布尔 = secret store 中是否有密码）；`PUT` 部分更新
 //! （None = 保持原值；`password: ""` = 清除；非空 = 设置/轮换），写期望
-//! 配置后触发 reconciler 走 GOST apply 链路。listener 端口（11080/18080）
+//! 配置后触发 reconciler 走网关 apply 链路。listener 端口（11080/18080）
 //! 不可改（AGENTS.md：host 端口映射归 Compose `.env`）。
 //!
 //! auth_enabled=true 且无密码时拒绝（P8 起不再允许"悬空"配置）。
@@ -37,7 +37,7 @@ pub async fn get(
         .map_err(secret_error)
         .map_err(|e| e.into_response_with(&request_id))?;
     let _ = user;
-    // P1 审查 #4：附上 GOST 实际状态（desired ≠ actual 必须可见）。
+    // P1 审查 #4：附上网关实际状态（desired ≠ actual 必须可见）。
     let actual = state
         .proxy_applier
         .status()
@@ -97,7 +97,7 @@ pub async fn update(
         .map_err(consistency_error)
         .map_err(|e| e.into_response_with(&request_id))?;
     state.notify_change();
-    // P1 审查 #3：PUT 返回的视图同样携带 GOST 实际状态——apply 尚未发生时
+    // P1 审查 #3：PUT 返回的视图同样携带网关实际状态——apply 尚未发生时
     // actual 反映旧状态，UI 据此展示「配置已保存，等待收敛」，不伪装成功。
     let actual = state
         .proxy_applier

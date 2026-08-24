@@ -3027,8 +3027,25 @@ P12-012 Version Metadata ✅ —— src/version.rs 统一版本解析（WARPDECK
 - 「外部进程崩溃恢复」→「网关任务 panic 注入 → supervised 重启 → 服务恢复」
 
 ```text
-P13 进行中状态（随实施更新）：
-P13-000 Design ✅ —— DESIGN §35 定稿（2026-08-23），本节为其计划投影。
+P13 状态（2026-08-24 完成）：
+P13-000 Design      ✅ DESIGN §35 定稿（2026-08-23），本节为其计划投影。
+P13-001 Phase A     ✅ gateway 骨架 + SOCKS5 入站 + 健康池 + allowlist（#19）
+P13-002 Phase B     ✅ HTTP 入站（CONNECT/absolute-URI）+ Basic Auth（#20）
+P13-003 Phase C     ✅ C-1 默认切 builtin（#21）；C-2 连接/RPS 限流
+                    （gateway::limits：信号量连接上限 + 令牌桶 RPS，顺序
+                    allowlist→认证→conn-limit）、删除 proxy/config.rs 渲染层/
+                    supervisor/旧 pool/GostManager、GostSettings→ProxySettings、
+                    parse_cidr 迁至 net.rs、镜像不含 gost 二进制（install-gost.sh/
+                    Dockerfile 腿/versions.json 全清）、WARPDECK_GATEWAY env 移除
+                    （显式 gost 报错）、日志源 gost.stderr.log 移除、README/docs 同步。
+P13-004 E2E-06      ✅ WARPDECK_GATEWAY_TEST_HOOKS=1 时 SIGUSR1 → serve 任务
+                    panic 注入；双层监督（内层 generation 重建 / 外层 supervise
+                    捕获 panic 指数退避）；E2E-06 改为 kill -USR1 1 → 有界轮询
+                    warp=on 恢复。L3 覆盖：tests/gateway_supervision.rs。
+遗留说明：
+- components.gost / gost_reason wire 字段名保留为历史契约，语义=网关实际状态
+  （DESIGN §35.5）。
+- redactor 中 gost 行规则保留兜底升级卷中的历史日志文件。
 ```
 
 ## 17.3 Phase Gate

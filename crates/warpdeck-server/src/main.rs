@@ -1,15 +1,15 @@
 //! warpdeck-server 二进制入口（P1-005，P6-008/P7-008 全量接线）。
 //!
-//! 启动顺序（DEVELOPMENT_PLAN §12.2 P7-008 / P6-008）：
+//! 启动顺序（DEVELOPMENT_PLAN §12.2 P7-008 / P6-008；P13-C 网关内置化）：
 //! config → 日志 → DB（migration）→ 仓储 → 运行时栈（manager/health）
-//! → GOST 代理栈 → reconciler（持有 trigger + 关停信号）→ Web。
+//! → 内置代理网关 → reconciler（持有 trigger + 关停信号）→ Web。
 //!
 //! 关停树（P1 审查 R2#5：信号即返回，随后**有界、按依赖序**逐层关停）：
 //!   ① SIGTERM → 置位 watch 并立即结束 graceful-shutdown future
 //!     （axum 随之停止接受新请求——慢清理不得滞留在 accept 阶段）
 //!   ② 健康监控 cancel + join（先停探测，避免与实例停止竞态评估）
 //!   ③ 等 reconciler 退出（有界；不再触碰 DB/运行时）
-//!   ④ 停 GOST
+//!   ④ 停网关 listener
 //!   ⑤ 停全部 WARP 实例并回收子进程
 //!   ⑥ 等 log tail watcher 退出（有界）
 //!   ⑦ 关闭 SQLite（最后一步）
@@ -35,10 +35,8 @@ use warpdeck_server::db::repo::{
     ProxyConfigRepository, SqliteProxyConfigRepository, SqliteWarpInstanceRepository,
     WarpInstanceRepository,
 };
-use warpdeck_server::proxy::pool::TcpReachabilityProbe;
-use warpdeck_server::proxy::GostManager;
 use warpdeck_server::reconciler::{
-    proxy_config_to_gost, ProxyApplier, Reconciler, DEFAULT_BACKOFF_BASE, DEFAULT_BACKOFF_MAX,
+    ProxyApplier, Reconciler, DEFAULT_BACKOFF_BASE, DEFAULT_BACKOFF_MAX,
 };
 use warpdeck_server::runtime::backoff::ExponentialBackoff;
 use warpdeck_server::runtime::clock::{Clock, SystemClock};
@@ -53,19 +51,12 @@ use warpdeck_server::runtime::process::{ProcessSpawner, TokioProcessSpawner};
 use warpdeck_server::runtime::registry::RuntimeRegistry;
 use warpdeck_server::runtime::warp_cli::{CommandExecutor, RealCommandExecutor, RealWarpControl};
 use warpdeck_server::runtime::WarpRuntime;
-use warpdeck_server::{app, config, db, observability, shutdown};
+use warpdeck_server::{app, config, db, gateway, observability, shutdown};
 
 /// WARP 注册最大尝试次数（flow.rs 约束 ≥1）。
 const MAX_REGISTER_ATTEMPTS: u32 = 3;
 /// 健康检查轮询间隔。
 const HEALTH_INTERVAL: Duration = Duration::from_secs(10);
-/// GOST listener/节点探活超时。
-const REACH_TIMEOUT: Duration = Duration::from_secs(2);
-/// GOST 停止宽限/轮询。
-const GOST_STOP_GRACE: Duration = Duration::from_secs(10);
-const GOST_STOP_POLL: Duration = Duration::from_millis(500);
-/// GOST 二进制路径（容器内固定，Compose 安装）。
-const GOST_BINARY: &str = "gost";
 
 fn main() {
     let cfg = config::AppConfig::from_env().expect("invalid bootstrap configuration");
@@ -88,8 +79,8 @@ fn app_version() -> String {
     warpdeck_server::version::app_version()
 }
 
-/// 完整启动路径（P6-008 / P7-008）：
-/// db → repos → runtime stack → gost → reconciler → web → graceful shutdown。
+/// 完整启动路径（P6-008 / P7-008；P13-C 网关内置化）：
+/// db → repos → runtime stack → builtin gateway → reconciler → web → graceful shutdown。
 async fn serve(cfg: config::AppConfig) {
     let pool = db::connect(&cfg.database_url)
         .await
@@ -140,7 +131,7 @@ async fn serve(cfg: config::AppConfig) {
     ));
     let manager = Arc::new(InstanceManager::new(
         registry.clone(),
-        spawner.clone(),
+        spawner,
         control,
         clock.clone(),
         Box::new(ExponentialBackoff::new(
@@ -153,7 +144,7 @@ async fn serve(cfg: config::AppConfig) {
         cfg.data_dir.clone(),
         cfg.runtime_dir.clone(),
         prober,
-        dplane.clone(),
+        dplane,
         bus.clone(),
     ));
     let runtime: Arc<dyn WarpRuntime> = manager.clone();
@@ -167,60 +158,35 @@ async fn serve(cfg: config::AppConfig) {
     )
     .spawn();
 
-    // --- GOST 代理栈（读期望配置，P6 reconciler 驱动 apply）---
+    // --- 内置代理网关（P13 / DESIGN §35：进程内 SOCKS5+HTTP，无外部二进制）---
     let proxy_cfg = proxy_repo.get().await.expect("failed to load proxy config");
-    // 保留具体引用：优雅关停时显式 stop（容器退出不留孤儿进程）。
-    let gost_manager = Arc::new(GostManager::new(
-        registry.clone(),
-        Arc::new(TcpReachabilityProbe {
-            connect_timeout: REACH_TIMEOUT,
-        }),
-        Arc::new(TcpReachabilityProbe {
-            connect_timeout: REACH_TIMEOUT,
-        }),
-        dplane,
-        spawner,
-        clock.clone(),
-        GOST_BINARY.to_string(),
-        cfg.data_dir.clone(),
-        proxy_config_to_gost(&proxy_cfg),
-        GOST_STOP_GRACE,
-        GOST_STOP_POLL,
-    ));
-    let gost: Arc<dyn ProxyApplier> = gost_manager.clone();
+    // 启动即应用持久化的期望配置（reconciler 之后按周期/事件幂等重放）。
+    let initial_settings = warpdeck_server::reconciler::proxy_settings_from_config(&proxy_cfg);
+    let gateway = gateway::BuiltinGateway::new(registry.clone(), cfg.socks5_bind, cfg.http_bind);
+    gateway
+        .apply_config(&initial_settings)
+        .await
+        .expect("failed to apply initial proxy config");
 
-    // --- P13（DESIGN §35）：网关实现选择（gost | builtin），迁移期共存 ---
-    // shutdown 通道在此提前创建：builtin 网关监督循环需要它的接收端。
+    // 关停通道提前创建：网关监督循环需要它的接收端。
     let trigger = Arc::new(Notify::new());
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let apply_error = warpdeck_server::reconciler::new_apply_error_slot();
 
-    let (gateway, gateway_for_stop): (Arc<dyn ProxyApplier>, Arc<dyn ProxyApplier>) =
-        match cfg.gateway {
-            config::GatewayKind::Builtin => {
-                let g = warpdeck_server::gateway::BuiltinGateway::new(
-                    registry.clone(),
-                    cfg.socks5_bind,
-                    cfg.http_bind,
-                );
-                // builtin 网关监督循环（Phase A：SOCKS5）。
-                let runner = g.clone();
-                let rx = shutdown_rx.clone();
-                tokio::spawn(async move { runner.run(rx).await });
-                (g.clone(), g)
-            }
-            config::GatewayKind::Gost => {
-                let g: Arc<dyn ProxyApplier> = gost_manager.clone();
-                (g.clone(), g)
-            }
-        };
+    // 网关监督循环（外层捕获 panic + 指数退避重启；DESIGN §35.2）。
+    {
+        let runner = gateway.clone();
+        let rx = shutdown_rx.clone();
+        tokio::spawn(async move { runner.supervise(rx).await });
+    }
+    let gateway: Arc<dyn ProxyApplier> = gateway;
 
     let mut reconciler = Reconciler::new(
         instances.clone(),
         proxy_repo.clone(),
         runtime.clone(),
         registry.clone(),
-        gost.clone(),
+        gateway.clone(),
         secrets.clone(),
         clock,
         cfg.data_dir.clone(),
@@ -305,9 +271,9 @@ async fn serve(cfg: config::AppConfig) {
     }
     tracing::info!("shutdown: reconciler stopped");
 
-    // ④ GOST 数据面。
-    if let Err(e) = gateway_for_stop.stop().await {
-        tracing::warn!(error = %e, "gost stop failed during shutdown");
+    // ④ 网关数据面（listener 全部关闭）。
+    if let Err(e) = gateway.stop().await {
+        tracing::warn!(error = %e, "gateway stop failed during shutdown");
     }
 
     // ⑤ 全部 WARP 实例 + 子进程回收；**全局 deadline** 防止后台任务持有锁

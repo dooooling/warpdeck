@@ -14,7 +14,7 @@ use crate::crypto::secret_store::SecretKind;
 use crate::observability::RequestId;
 
 /// `GET /api/v1/system/status`（P7-003）：进程存活 + 实例统计 + 组件
-/// operational 状态（P1 审查 #4：GOST/secret store 的真实健康，而非恒 ok）。
+/// operational 状态（P1 审查 #4：gateway/secret store 的真实健康，而非恒 ok）。
 pub async fn status(
     State(state): State<ApiState>,
     RequestId(_rid): RequestId,
@@ -23,7 +23,7 @@ pub async fn status(
     let snapshots = state.registry.list();
     let counts = InstanceCountsView::from_runtime(&snapshots);
 
-    // GOST actual（P1 审查 #4）。
+    // gateway actual（P1 审查 #4；wire 键名 gost 为历史契约，语义 = 当前代理网关实现状态）。
     let gost_view = match state.proxy_applier.status().await {
         Some(s) => crate::api::dto::ProxyActualView::from_status(&s),
         None => crate::api::dto::ProxyActualView {

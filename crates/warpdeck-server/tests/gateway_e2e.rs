@@ -8,8 +8,8 @@ use tokio::net::{TcpListener, TcpStream};
 
 use warpdeck_server::gateway::pool::RoundRobinPool;
 use warpdeck_server::gateway::BuiltinGateway;
-use warpdeck_server::proxy::GostSettings;
 use warpdeck_server::reconciler::ProxyApplier;
+use warpdeck_server::reconciler::ProxySettings;
 use warpdeck_server::runtime::registry::{RuntimeRegistry, RuntimeState};
 
 #[allow(dead_code)]
@@ -94,7 +94,7 @@ async fn builtin_gateway_connect_end_to_end() {
         "127.0.0.1:0".parse().unwrap(),
     );
 
-    let settings = GostSettings {
+    let settings = ProxySettings {
         socks5_enabled: true,
         http_enabled: false,
         auth: None,

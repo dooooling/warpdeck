@@ -1,14 +1,18 @@
-//! 内置代理网关（P13 / DESIGN §35）：进程内替代 GOST 的 SOCKS5 入站（Phase A）。
+//! 内置代理网关（P13 / DESIGN §35）：进程内替代 GOST 的统一入站。
 //!
-//! - supervised listener task：bind 失败指数退避；apply 触发热重建
+//! - supervised listener task：bind 失败指数退避；apply 触发热重建；
+//!   listener 意外退出（含 handler panic 上抛）也走退避重建——不再依赖
+//!   reconciler 周期性重复 apply 兜底
 //! - SOCKS5 CONNECT 子集（RFC1928；认证子协商 user/pass 可选）
+//! - HTTP CONNECT 隧道 + absolute-URI 转发 + Basic Auth（Phase B）
 //! - RoundRobinPool：只消费 RuntimeRegistry 中 Healthy 实例
-//! - allowlist 会话前置校验（复用 proxy::config::parse_cidr）
-//! - `BuiltinGateway` 实现 `ProxyApplier`
-//!
-//! HTTP :18080 入站为 Phase B（DESIGN §35.6）。
+//! - allowlist 会话前置校验（crate::net 严格 CIDR）
+//! - 连接/RPS 限流（Phase C，allowlist → 认证之后执行）
+//! - `BuiltinGateway` 实现 `ProxyApplier`；外层 `supervise` 捕获任务
+//!   panic 并指数退避重启（P13-004：网关崩溃 = 重启 + 状态上浮）
 
 pub mod http;
+pub mod limits;
 pub mod pool;
 pub mod socks5;
 
@@ -18,10 +22,12 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 
-use crate::proxy::{GostSettings, ProxyStatus};
+use crate::net::parse_cidr;
+use crate::reconciler::{ProxySettings, ProxyStatus};
 use crate::runtime::backoff::BackoffPolicy;
 use crate::runtime::registry::RuntimeRegistry;
 
+use self::limits::SessionLimits;
 use self::pool::RoundRobinPool;
 
 /// 网关运行时快照（apply 写入，listener 任务读取）。
@@ -29,14 +35,16 @@ use self::pool::RoundRobinPool;
 pub struct GatewayConfig {
     pub socks5_enabled: bool,
     pub http_enabled: bool,
-    /// None = 匿名入站；(username, password) 明文仅存内存（与旧 gost.yaml 一致）。
+    /// None = 匿名入站；(username, password) 明文仅存内存。
     pub auth: Option<(String, String)>,
     /// 允许的客户端 CIDR 文本（空 = 允许全部）。
     pub allowlist: Vec<String>,
+    /// 连接/RPS 限流（None = 未配置任何上限）。
+    pub limits: Option<Arc<SessionLimits>>,
 }
 
 impl GatewayConfig {
-    pub fn from_settings(s: &GostSettings) -> Self {
+    pub fn from_settings(s: &ProxySettings) -> Self {
         Self {
             socks5_enabled: s.socks5_enabled,
             http_enabled: s.http_enabled,
@@ -45,6 +53,7 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|a| (a.username.clone(), a.password.clone())),
             allowlist: s.allowlist.clone(),
+            limits: Some(SessionLimits::new(s.max_connections, s.max_rps)),
         }
     }
 }
@@ -53,10 +62,17 @@ impl GatewayConfig {
 #[derive(Default)]
 pub(crate) struct SharedState {
     config: Mutex<Option<GatewayConfig>>,
+    /// 最近一次 apply 的期望配置（幂等 diff-skip：reconciler 每轮重放同一份
+    /// 期望配置，内容未变化时**不得**触发 listener 重建——否则每 reconcile
+    /// 周期都会拆掉在途会话，等价于旧 GostManager 的 diff-skip 语义）。
+    last_applied: Mutex<Option<ProxySettings>>,
     stopped: AtomicBool,
     active: AtomicBool,
     last_error: Mutex<Option<String>>,
     conn_total: AtomicU64,
+    /// 测试钩子（WARPDECK_GATEWAY_TEST_HOOKS=1 + SIGUSR1）：置位后 socks5
+    /// serve 任务在下一轮 accept 前主动 panic（P13-004 注入用；默认恒 false）。
+    pub(crate) panic_requested: AtomicBool,
     /// 唤醒监督循环（apply 重建 / stop 退出 共用单通道，waiter 只有 supervisor）。
     wake: Notify,
 }
@@ -74,6 +90,10 @@ impl SharedState {
     fn set_error(&self, err: Option<String>) {
         *self.last_error.lock().unwrap() = err;
     }
+
+    pub(crate) fn take_panic_request(&self) -> bool {
+        self.panic_requested.swap(false, Ordering::SeqCst)
+    }
 }
 
 /// 内置网关。clone 廉价（Arc 共享）。
@@ -85,6 +105,11 @@ pub struct BuiltinGateway {
     pub(crate) socks5_addr: SocketAddr,
     pub(crate) http_addr: SocketAddr,
 }
+
+/// supervise 视为「稳定运行」的时长：超过后连续崩溃计数清零。
+const SUPERVISE_STABLE_RESET: std::time::Duration = std::time::Duration::from_secs(60);
+/// 连续快速崩溃达到该次数后把原因写入 last_error（status 上浮 Failed）。
+const SUPERVISE_CRASH_ALERT_THRESHOLD: u32 = 3;
 
 impl BuiltinGateway {
     /// 生产构造：内部端口基址 = FIRST_WARP_PORT（40000）。
@@ -113,7 +138,91 @@ impl BuiltinGateway {
         })
     }
 
-    /// 监督循环（生产入口）。
+    /// 生产监督入口：捕获 `run` 任务边界 panic，指数退避重启（DESIGN §35.2）。
+    ///
+    /// 正常退出路径只有 stop/shutdown；panic 后按 BackoffPolicy 重启，
+    /// 连续快速崩溃超阈值时把原因写入 last_error（status → Failed 上浮）。
+    pub async fn supervise(
+        self: std::sync::Arc<Self>,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
+        #[cfg(unix)]
+        self.spawn_fault_injection_hook();
+
+        let backoff = crate::runtime::backoff::ExponentialBackoff::recommended();
+        let mut crashes: u32 = 0;
+        loop {
+            let started = std::time::Instant::now();
+            let runner = self.clone();
+            let rx = shutdown.clone();
+            let handle = tokio::spawn(async move { runner.run(rx).await });
+            match handle.await {
+                Ok(()) => break,
+                Err(join_err) if join_err.is_panic() => {
+                    if started.elapsed() >= SUPERVISE_STABLE_RESET {
+                        crashes = 0;
+                    }
+                    crashes = crashes.saturating_add(1);
+                    let delay = backoff.delay_for(crashes);
+                    tracing::error!(
+                        component = "gateway",
+                        crashes,
+                        delay = ?delay,
+                        panic = %join_err,
+                        "gateway task panicked; restarting under supervision"
+                    );
+                    if crashes >= SUPERVISE_CRASH_ALERT_THRESHOLD {
+                        self.shared
+                            .set_error(Some(format!("gateway task keeps crashing: {join_err}")));
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = shutdown.changed() => break,
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// 测试钩子（仅 unix 容器）：`WARPDECK_GATEWAY_TEST_HOOKS=1` 时监听
+    /// SIGUSR1，收到后请求 socks5 serve 任务注入 panic。生产镜像不设该 env，
+    /// 钩子保持惰性（无信号监听、无行为差异）。
+    #[cfg(unix)]
+    fn spawn_fault_injection_hook(self: &std::sync::Arc<Self>) {
+        let armed = std::env::var("WARPDECK_GATEWAY_TEST_HOOKS")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if !armed {
+            return;
+        }
+        tracing::warn!(
+            component = "gateway",
+            "test hooks armed (SIGUSR1 injects serve-task panic)"
+        );
+        let hook = self.clone();
+        tokio::spawn(async move {
+            let mut sig =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                    .expect("failed to install SIGUSR1 handler");
+            while sig.recv().await.is_some() {
+                tracing::warn!(
+                    component = "gateway",
+                    "SIGUSR1 received; requesting fault injection"
+                );
+                hook.request_fault_injection();
+            }
+        });
+    }
+
+    /// 测试钩子（P13-004 / E2E-06）：请求 socks5 serve 任务在下一轮
+    /// accept 前注入 panic，验证监督循环的崩溃→重启→恢复链路。
+    #[doc(hidden)]
+    pub fn request_fault_injection(&self) {
+        self.shared.panic_requested.store(true, Ordering::SeqCst);
+    }
+
+    /// 监督循环（测试入口；生产请用 `supervise`）。
     pub async fn run(self: std::sync::Arc<Self>, shutdown: tokio::sync::watch::Receiver<bool>) {
         self.run_with_ready(shutdown, None).await;
     }
@@ -139,72 +248,10 @@ impl BuiltinGateway {
                 }
             };
 
-            // Phase A 仅 SOCKS5；Phase B 加入 HTTP 入站。
-            if cfg.http_enabled {
-                tracing::debug!(
-                    component = "gateway",
-                    http = %self.http_addr,
-                    "http inbound enabled (builtin)"
-                );
-            } else {
-                tracing::debug!(
-                    component = "gateway",
-                    http = %self.http_addr,
-                    "http inbound disabled"
-                );
-            }
-
-            let pool = self.pool.clone();
-            let shared = self.shared.clone();
-            let cfg_task = cfg.clone();
-
             // bind 在监督循环内完成（便于向 ready 上报实际地址）；serve 任务
             // 仅负责 accept/handler，重建时被 abort 后由下一轮重新 bind。
-            match tokio::net::TcpListener::bind(self.socks5_addr).await {
-                Ok(listener) => {
-                    if let Some(tx) = ready.take() {
-                        let addr = listener.local_addr().unwrap_or(self.socks5_addr);
-                        let _ = tx.send(addr);
-                    }
-                    self.shared.active.store(true, Ordering::SeqCst);
-                    self.shared.set_error(None);
-
-                    // Phase B：HTTP listener（cfg.http_enabled 控制）。
-                    if cfg.http_enabled {
-                        match tokio::net::TcpListener::bind(self.http_addr).await {
-                            Ok(http_listener) => {
-                                let http_shared = shared.clone();
-                                let http_pool = pool.clone();
-                                let http_cfg = cfg.clone();
-                                tokio::spawn(async move {
-                                    http::serve(http_listener, http_shared, http_pool, http_cfg)
-                                        .await;
-                                });
-                            }
-                            Err(e) => {
-                                tracing::error!(component = "gateway", error = %e, "http bind failed");
-                            }
-                        }
-                    }
-
-                    let mut serve_task = tokio::spawn(async move {
-                        socks5::serve(listener, shared, pool, cfg_task).await;
-                    });
-
-                    tokio::select! {
-                        _ = &mut serve_task => {
-                            tracing::warn!(component = "gateway", "socks5 listener exited unexpectedly");
-                        }
-                        _ = self.shared.wake.notified() => {}
-                        _ = shutdown.changed() => {}
-                    }
-                    // 重建/退出前中止旧 accept 任务（listener 随之 drop）。
-                    serve_task.abort();
-                    let _ = serve_task.await;
-
-                    // 停止 HTTP listener（如果已启动）。通过 drop TcpListener 实现。
-                    // serve task 被 abort 后，其内部持有的 http listener 也会释放。
-                }
+            let socks5_listener = match tokio::net::TcpListener::bind(self.socks5_addr).await {
+                Ok(listener) => listener,
                 Err(e) => {
                     let msg = format!("bind {}: {e}", self.socks5_addr);
                     tracing::error!(component = "gateway", error = %e, "socks5 bind failed");
@@ -219,16 +266,104 @@ impl BuiltinGateway {
                     }
                     continue;
                 }
+            };
+
+            if let Some(tx) = ready.take() {
+                let addr = socks5_listener.local_addr().unwrap_or(self.socks5_addr);
+                let _ = tx.send(addr);
+            }
+            self.shared.active.store(true, Ordering::SeqCst);
+            self.shared.set_error(None);
+
+            // HTTP listener（cfg.http_enabled 控制；bind 失败只降级该协议，
+            // 不拖垮 SOCKS5——与旧 GOST 双 listener 语义一致）。
+            let mut http_task: Option<tokio::task::JoinHandle<()>> = if cfg.http_enabled {
+                match tokio::net::TcpListener::bind(self.http_addr).await {
+                    Ok(http_listener) => {
+                        let http_shared = self.shared.clone();
+                        let http_pool = self.pool.clone();
+                        let http_cfg = cfg.clone();
+                        Some(tokio::spawn(async move {
+                            http::serve(http_listener, http_shared, http_pool, http_cfg).await;
+                        }))
+                    }
+                    Err(e) => {
+                        tracing::error!(component = "gateway", error = %e, "http bind failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let mut socks5_task = {
+                let shared = self.shared.clone();
+                let pool = self.pool.clone();
+                let cfg_task = cfg.clone();
+                tokio::spawn(async move {
+                    socks5::serve(socks5_listener, shared, pool, cfg_task).await;
+                })
+            };
+
+            // 任一 listener 意外退出（含 panic）都触发整代重建。
+            #[derive(Debug)]
+            enum GenerationExit {
+                Socks(std::result::Result<(), tokio::task::JoinError>),
+                Http(std::result::Result<(), tokio::task::JoinError>),
+                Apply,
+                Shutdown,
+            }
+            let exit = tokio::select! {
+                r = &mut socks5_task => GenerationExit::Socks(r),
+                r = async {
+                    match http_task.as_mut() {
+                        Some(t) => t.await,
+                        None => std::future::pending().await,
+                    }
+                } => GenerationExit::Http(r),
+                _ = self.shared.wake.notified() => GenerationExit::Apply,
+                _ = shutdown.changed() => GenerationExit::Shutdown,
+            };
+
+            // 清理本代 listener 任务。注意：经 select 分支完成的那个
+            // JoinHandle 输出已被消费，再 await 会 panic（polled after
+            // completion）——只 abort/await 未自然结束的一方。
+            if !matches!(exit, GenerationExit::Socks(_)) {
+                socks5_task.abort();
+                let _ = socks5_task.await;
+            }
+            if let Some(t) = http_task.as_mut() {
+                if !matches!(exit, GenerationExit::Http(_)) {
+                    t.abort();
+                    let _ = t.await;
+                }
             }
 
-            if self.shared.stopped.load(Ordering::SeqCst) {
-                break;
-            }
-            // 配置变化 → 立即重建；正常路径不退避。
-            attempt = 0;
-            tokio::select! {
-                _ = self.shared.wake.notified() => {}
-                _ = shutdown.changed() => break,
+            match exit {
+                GenerationExit::Shutdown => break,
+                GenerationExit::Apply => {
+                    // 配置热更新：立即以新快照重建，不退避。
+                    attempt = 0;
+                }
+                GenerationExit::Socks(r) | GenerationExit::Http(r) => {
+                    let detail = match &r {
+                        Err(je) if je.is_panic() => format!("panicked: {je}"),
+                        Err(je) => format!("cancelled: {je}"),
+                        Ok(()) => "returned".to_string(),
+                    };
+                    tracing::warn!(
+                        component = "gateway",
+                        reason = %detail,
+                        "listener task exited unexpectedly; rebuilding"
+                    );
+                    let d = backoff.delay_for(attempt.saturating_add(1));
+                    attempt = attempt.saturating_add(1).min(8);
+                    tokio::select! {
+                        _ = tokio::time::sleep(d) => {}
+                        _ = self.shared.wake.notified() => {}
+                        _ = shutdown.changed() => break,
+                    }
+                }
             }
         }
         self.shared.active.store(false, Ordering::SeqCst);
@@ -238,7 +373,18 @@ impl BuiltinGateway {
 
 #[async_trait::async_trait]
 impl crate::reconciler::ProxyApplier for BuiltinGateway {
-    async fn apply_config(&self, settings: &GostSettings) -> Result<(), String> {
+    async fn apply_config(&self, settings: &ProxySettings) -> Result<(), String> {
+        // 幂等 diff-skip（P13-C 回归修复）：reconciler 每轮重放同一份期望
+        // 配置，内容未变化时不重建 listener（否则每 reconcile 周期都会中断
+        // 全部在途会话）。stop() 会清空 last_applied，stop 后重放同配置仍会
+        // 正确触发启动。
+        {
+            let mut last = self.shared.last_applied.lock().unwrap();
+            if last.as_ref() == Some(settings) {
+                return Ok(());
+            }
+            *last = Some(settings.clone());
+        }
         self.shared
             .set_config(Some(GatewayConfig::from_settings(settings)));
         Ok(())
@@ -272,6 +418,8 @@ impl crate::reconciler::ProxyApplier for BuiltinGateway {
 
     async fn stop(&self) -> Result<(), String> {
         self.shared.stopped.store(true, Ordering::SeqCst);
+        // 清空 diff-skip 基线：stop 后即使重放同一份配置也必须真正启动。
+        *self.shared.last_applied.lock().unwrap() = None;
         self.shared.wake.notify_waiters();
         self.shared.active.store(false, Ordering::SeqCst);
         Ok(())
@@ -306,41 +454,10 @@ pub(crate) fn client_allowed(peer: std::net::IpAddr, allowlist: &[String]) -> bo
     if allowlist.is_empty() {
         return true;
     }
-    allowlist.iter().any(|cidr| cidr_match(cidr, peer))
-}
-
-fn cidr_match(cidr: &str, ip: std::net::IpAddr) -> bool {
-    use crate::proxy::config::IpNetwork as N;
-    let Ok(net) = crate::proxy::config::parse_cidr(cidr) else {
-        return false;
-    };
-    match net {
-        N::Exact(exact) => exact == ip,
-        N::V4 { net, prefix } => match ip {
-            std::net::IpAddr::V4(v4) => {
-                let bits = u32::from(prefix).min(32);
-                let mask = if bits == 0 {
-                    0
-                } else {
-                    u32::MAX << (32 - bits)
-                };
-                (u32::from(v4) & mask) == (u32::from(net) & mask)
-            }
-            _ => false,
-        },
-        N::V6 { net, prefix } => match ip {
-            std::net::IpAddr::V6(v6) => {
-                let bits = u32::from(prefix).min(128);
-                let mask = if bits == 0 {
-                    0
-                } else {
-                    u128::MAX << (128 - bits)
-                };
-                (u128::from(v6) & mask) == (u128::from(net) & mask)
-            }
-            _ => false,
-        },
-    }
+    allowlist.iter().any(|cidr| match parse_cidr(cidr) {
+        Ok(net) => net.contains(peer),
+        Err(_) => false,
+    })
 }
 
 #[cfg(test)]
@@ -378,5 +495,29 @@ mod tests {
     #[test]
     fn empty_allowlist_allows_everything() {
         assert!(client_allowed("10.1.2.3".parse().unwrap(), &[]));
+    }
+
+    #[test]
+    fn gateway_config_carries_limits() {
+        let settings = ProxySettings {
+            socks5_enabled: true,
+            http_enabled: true,
+            auth: None,
+            allowlist: vec![],
+            max_connections: Some(7),
+            max_rps: Some(3),
+        };
+        let cfg = GatewayConfig::from_settings(&settings);
+        let limits = cfg.limits.expect("limits must be built");
+        // 行为由 limits 单元测试覆盖；此处验证装配链路。
+        assert!(Arc::strong_count(&limits) >= 1);
+
+        let unlimited = GatewayConfig::from_settings(&ProxySettings {
+            max_connections: None,
+            max_rps: None,
+            ..settings
+        });
+        // SessionLimits::new(None, None) 仍返回实例（内部两个 None 分支直通）。
+        assert!(unlimited.limits.is_some());
     }
 }

@@ -11,7 +11,7 @@ Cloudflare WARP Web Manager — 在单容器内动态管理多个 WARP 实例，
 依赖:Docker + Docker Compose(仅服务器端;管理界面为内置 Web UI,无需另装前端)。
 
 ```bash
-# 1. 构建镜像(GOST/WARP 依赖在构建期内自动下载并做 SHA256 校验;
+# 1. 构建镜像(WARP 依赖在构建期内自动下载并做 SHA256 校验;
 #    中国网络下加 --proxy socks5h://host.docker.internal:10808 走宿主代理)
 cargo xtask release
 
@@ -103,6 +103,5 @@ WarpDeck 本体（Rust 后端 / Web 前端 / 脚本 / 文档）以 **MIT License
 
 - **Cloudflare WARP**（`cloudflare-warp_2026.6.880.0_amd64.deb`）：Cloudflare 客户端软件，
   受 Cloudflare 服务条款与客户端许可约束；默认仅面向个人/非商业使用，商业使用需另行确认。
-- **GOST**（v3.2.6）：MIT License（ginuerzh/gost），随镜像再分发需保留其许可证文本。
 - **Rust crates / npm 包**：各依赖按其自身许可证（MIT/Apache-2.0/BSD 等）授权；
   SBOM 见发布产物的 `scans/`。

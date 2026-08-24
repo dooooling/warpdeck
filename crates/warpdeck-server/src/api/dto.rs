@@ -214,7 +214,7 @@ pub struct ProxyConfigView {
     pub allowed_ips: Vec<String>,
     pub max_connections: Option<u32>,
     pub max_rps: Option<u32>,
-    /// GOST 实际状态（P1 审查 #4：desired ≠ actual 必须可见）。
+    /// 网关实际状态（P1 审查 #4：desired ≠ actual 必须可见）。
     /// None = 实现未追踪（测试 fake）；生产恒 Some。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual: Option<ProxyActualView>,
@@ -235,14 +235,14 @@ impl ProxyConfigView {
         }
     }
 
-    /// 附加实际状态（GET/PUT handler 在查询 GostManager 后调用）。
+    /// 附加实际状态（GET/PUT handler 在查询 ProxyApplier 后调用）。
     pub fn with_actual(mut self, actual: Option<ProxyActualView>) -> Self {
         self.actual = actual;
         self
     }
 }
 
-/// GOST 数据面实际状态视图。
+/// 代理数据面实际状态视图。
 /// `status`: `running` / `stopped` / `degraded` / `failed`。
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyActualView {
@@ -256,8 +256,8 @@ pub struct ProxyActualView {
 }
 
 impl ProxyActualView {
-    pub fn from_status(status: &crate::proxy::ProxyStatus) -> Self {
-        use crate::proxy::ProxyStatus as S;
+    pub fn from_status(status: &crate::reconciler::ProxyStatus) -> Self {
+        use crate::reconciler::ProxyStatus as S;
         match status {
             S::Stopped => Self {
                 status: "stopped".into(),
@@ -395,9 +395,9 @@ pub struct SystemStatusView {
 /// 组件 operational 视图（P1 审查 #4）。
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemComponentsView {
-    /// GOST 数据面：`running` / `stopped` / `degraded` / `failed`。
+    /// 网关数据面：`running` / `stopped` / `degraded` / `failed`。
     pub gost: String,
-    /// GOST 非 Running 时的人类可读原因（Failed/Degraded 携带）。
+    /// 网关非 Running 时的人类可读原因（Failed/Degraded 携带）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gost_reason: Option<String>,
     /// secret store 可用性（读探针；`ok` / `unavailable`）。

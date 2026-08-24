@@ -1,6 +1,6 @@
 //! `/api/v1/health` liveness probe（P1-008）。
 //!
-//! 设计约束：必须立即返回、不得检查真实 WARP / GOST，不访问数据库。
+//! 设计约束：必须立即返回、不得检查真实 WARP / 网关数据面，不访问数据库。
 
 use axum::Json;
 use serde_json::{json, Value};

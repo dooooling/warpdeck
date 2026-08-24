@@ -1,11 +1,11 @@
 //! 实时日志 tail watcher（P10-007）。
 //!
-//! 对每个日志源（manager / gost / 现存实例）独立任务：
+//! 对每个日志源（manager / 现存实例）独立任务：
 //! - 从文件**末尾**开始跟随（只推送新行，历史走 History API）；
 //! - 文件被截断（进程重启 `File::create`）→ 从头重跟；
 //! - 文件被删除 → 内循环退出、按发现周期重试（实例日志随实例创建出现；
 //!   监督任务按周期重新枚举源并补缺）；
-//! - 每行先过中心 redactor（instance/gost 整行 scrub；manager 原样，
+//! - 每行先过中心 redactor（instance 整行 scrub；manager 原样，
 //!   结构化字段级已由 `Sensitive` 保证，DESIGN §27.2）；
 //! - 发布到 `LogBus`（broadcast 1024，慢订阅者 lagged 丢行，P10-008）。
 //!

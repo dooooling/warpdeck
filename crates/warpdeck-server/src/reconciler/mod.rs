@@ -6,7 +6,7 @@
 //! - 幂等：Healthy/E 进行中的实例不重复 start；保证重入安全；
 //! - 单实例失败不阻塞全局（逐实例 try，错误记录后继续）；
 //! - Failed 且 auto_restart 时指数退避重试（base 5s，翻倍，封顶 max_backoff）；
-//! - 代理（GOST）同步与本循环同频，经 `ProxyApplier` 接缝注入；
+//! - 代理网关同步与本循环同频，经 `ProxyApplier` 接缝注入；
 //! - 触发：固定 interval + `Notify`（P7 API 变更后调用）+ 事件总线
 //!   （health/crash 状态迁移；仅 Failed 类事件触发整轮 reconcile）。
 
@@ -19,7 +19,6 @@ use tokio::sync::{watch, Notify};
 use tracing::{debug, error, info, warn};
 
 use crate::db::repo::{ProxyConfigRepository, WarpInstanceRepository, WarpInstanceSpec};
-use crate::proxy::GostSettings;
 use crate::runtime::clock::Clock;
 use crate::runtime::context::InstanceContext;
 use crate::runtime::events::{EventBus, HealthEvent};
@@ -34,23 +33,66 @@ pub const DEFAULT_BACKOFF_BASE: Duration = Duration::from_secs(5);
 /// 失败重试退避上限：5min。
 pub const DEFAULT_BACKOFF_MAX: Duration = Duration::from_secs(300);
 
-/// 代理配置应用接缝（P6-008 GOST 配置收敛）。
+/// 代理网关状态（原 GOST 词汇；P13-C 起由内置网关实现，语义不变：
+/// Running / Degraded / Failed 区分，DESIGN §13.5 → §35）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyStatus {
+    Stopped,
+    /// 网关存活 + 全部启用 listener 就绪 + upstream >= 1。
+    Running {
+        pid: u32,
+        healthy_upstreams: usize,
+        applied_at: String,
+    },
+    /// 网关存活但 listener 部分失效，或 upstream 池为空。
+    Degraded {
+        reason: String,
+        pid: Option<u32>,
+    },
+    /// 网关已退出/崩溃。
+    Failed {
+        reason: String,
+        exit_code: Option<i32>,
+    },
+}
+
+/// 代理认证凭据（明文仅存在于内存中 apply 的瞬间；
+/// HTTP API 侧由 P7/P8 加密存储，GET 永不回显）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyAuth {
+    pub username: String,
+    pub password: String,
+}
+
+/// 静态代理参数（期望配置 → `ProxyApplier` 的传递形态；P6 后由 SQLite 提供）。
+/// P13-C 前名为 `GostSettings`，随 GOST 移除更名（字段语义不变）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxySettings {
+    pub socks5_enabled: bool,
+    pub http_enabled: bool,
+    pub auth: Option<ProxyAuth>,
+    pub allowlist: Vec<String>,
+    pub max_connections: Option<u32>,
+    pub max_rps: Option<u32>,
+}
+
+/// 代理配置应用接缝（P6-008；P13-C 起 builtin 网关为唯一生产实现）。
 ///
-/// Reconciler 不直接依赖 `GostManager` 具体类型：测试注入 fake，
-/// 生产由 `GostManager` 实现（main 组装时 `Arc<dyn ProxyApplier>`）。
+/// Reconciler 不依赖具体实现：测试注入 fake，
+/// 生产由 `gateway::BuiltinGateway` 实现（main 组装时 `Arc<dyn ProxyApplier>`）。
 #[async_trait]
 pub trait ProxyApplier: Send + Sync {
-    /// 应用期望代理配置（GOST 幂等：diff 后跳过或 apply+restart）。
-    async fn apply_config(&self, settings: &GostSettings) -> Result<(), String>;
+    /// 应用期望代理配置（幂等：内容未变化时可跳过实际动作）。
+    async fn apply_config(&self, settings: &ProxySettings) -> Result<(), String>;
 
-    /// GOST 当前**实际**状态（P1 审查 #4：actual state 必须可观测）。
+    /// 网关当前**实际**状态（P1 审查 #4：actual state 必须可观测）。
     /// None = 该实现不追踪（fake 缺省）。
-    async fn status(&self) -> Option<crate::proxy::ProxyStatus> {
+    async fn status(&self) -> Option<ProxyStatus> {
         None
     }
 
-    /// 显式停止 GOST（P1 审查 #4：期望 = 无任何 listener 时，实际必须无进程；
-    /// GostConfig 本身拒绝全关配置，因此「全关」只能走 stop 而非 apply）。
+    /// 显式停止网关（P1 审查 #4：期望 = 无任何 listener 时，实际必须无 listener；
+    /// 「全关」走 stop 而非 apply）。
     async fn stop(&self) -> Result<(), String> {
         Ok(())
     }
@@ -73,10 +115,10 @@ pub fn new_apply_error_slot() -> ApplyErrorSlot {
     Arc::new(std::sync::Mutex::new(None))
 }
 
-/// 由 `proxy_config` 仓库行构造 GOST 期望配置（无密码版本；
-/// 运行时循环内用 `Reconciler::gost_settings` 补齐密码——见下）。
-pub fn proxy_config_to_gost(cfg: &crate::db::repo::ProxyConfig) -> GostSettings {
-    GostSettings {
+/// 由 `proxy_config` 仓库行构造网关期望配置（无密码版本；
+/// 运行时循环内 `sync_proxy` 补齐密码——见下）。
+pub fn proxy_settings_from_config(cfg: &crate::db::repo::ProxyConfig) -> ProxySettings {
+    ProxySettings {
         socks5_enabled: cfg.socks5_enabled,
         http_enabled: cfg.http_enabled,
         auth: None, // 密码由 P8 secret store 注入（sync_proxy）
@@ -93,7 +135,7 @@ pub struct Reconciler {
     runtime: Arc<dyn WarpRuntime>,
     registry: Arc<RuntimeRegistry>,
     proxy: Arc<dyn ProxyApplier>,
-    /// P8：代理密码 / 账号凭据的解密来源（渲染 GOST 时读取，绝不落日志）。
+    /// P8：代理密码 / 账号凭据的解密来源（注入网关配置时读取，绝不落日志）。
     secrets: Arc<dyn crate::crypto::secret_store::SecretStore>,
     clock: Arc<dyn Clock>,
     data_dir: PathBuf,
@@ -429,15 +471,15 @@ impl Reconciler {
         let _ = now;
     }
 
-    /// 代理配置同步（幂等；GostManager 内部 diff-skip）。
+    /// 代理配置同步（幂等）。
     ///
-    /// P8：auth_enabled 时从 secret store 取密码渲染 GOST。
+    /// P8：auth_enabled 时从 secret store 取密码注入网关配置。
     ///
     /// **fail-closed（P0 审查 #2 修订）**：`auth_enabled=true` 是用户声明的安全
     /// 姿态。密码缺失（Ok(None)，状态不一致）或读取/解密失败（Err，如 master
     /// key 损坏）时**绝不**降级为 `auth: None` 匿名代理——那等于密钥一坏、
-    /// 公网端口裸奔且 UI 毫无感知。正确动作：跳过本次 apply，保留 GOST 当前
-    /// 已验证配置（含认证）；首次应用前 GOST 处于 Stopped（无 listener），
+    /// 公网端口裸奔且 UI 毫无感知。正确动作：跳过本次 apply，保留网关当前
+    /// 已验证配置（含认证）；首次应用前网关处于 Stopped（无 listener），
     /// 天然不暴露。失败以 error 级日志呈现；实际状态上浮 API/UI 由 #3 承接。
     async fn sync_proxy(&self) {
         let cfg = match self.proxy_repo.get().await {
@@ -447,22 +489,22 @@ impl Reconciler {
                 return;
             }
         };
-        let mut settings = proxy_config_to_gost(&cfg);
+        let mut settings = proxy_settings_from_config(&cfg);
 
-        // P1 审查 #4：期望 = 两个 listener 全关时，实际必须**显式停 GOST**
-        // （GostConfig 拒绝全关渲染，旧进程会继续监听 → UI 显示已关但端口仍开）。
+        // P1 审查 #4：期望 = 两个 listener 全关时，实际必须**显式停网关**
+        // （否则旧 listener 会继续监听 → UI 显示已关但端口仍开）。
         if !settings.socks5_enabled && !settings.http_enabled {
             match self.proxy.stop().await {
                 Ok(()) => {
                     debug!(
                         component = "reconciler",
-                        "gost stopped (no listeners enabled)"
+                        "gateway stopped (no listeners enabled)"
                     );
                     self.clear_apply_error();
                 }
                 Err(e) => {
-                    let msg = format!("gost stop failed: {e}");
-                    error!(component = "reconciler", error = %e, "gost stop failed");
+                    let msg = format!("gateway stop failed: {e}");
+                    error!(component = "reconciler", error = %e, "gateway stop failed");
                     self.record_apply_error(msg);
                 }
             }
@@ -476,7 +518,7 @@ impl Reconciler {
                 .await
             {
                 Ok(Some(password)) => {
-                    settings.auth = Some(crate::proxy::ProxyAuth {
+                    settings.auth = Some(ProxyAuth {
                         username: cfg.proxy_username.unwrap_or_default(),
                         password,
                     });
@@ -514,7 +556,7 @@ impl Reconciler {
             }
             Err(e) => {
                 warn!(component = "reconciler", error = %e, "proxy config apply failed");
-                self.record_apply_error(format!("gost apply failed: {e}"));
+                self.record_apply_error(format!("gateway apply failed: {e}"));
             }
         }
     }

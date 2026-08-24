@@ -16,17 +16,16 @@ use serde::Deserialize;
 pub struct Versions {
     #[serde(rename = "app_version")]
     pub app_version: String,
-    pub gost: Artifact,
     pub warp: Artifact,
 }
 
-/// 单个大文件依赖（GOST tarball / WARP deb）的版本与校验信息。
+/// 单个大文件依赖（WARP deb）的版本与校验信息。
 /// 注意：`url` 字段刻意不反序列化——它的唯一消费者是 Dockerfile
 /// （build context COPY + jq），Rust 侧只关心版本号与哈希展示。
 #[derive(Debug, Clone, Deserialize)]
 pub struct Artifact {
     pub version: String,
-    /// 小写十六进制 SHA256（镜像内 fetch-deps.sh 与 install-gost.sh 双重复核）。
+    /// 小写十六进制 SHA256（镜像内 fetch-deps.sh 复核）。
     pub sha256: String,
 }
 

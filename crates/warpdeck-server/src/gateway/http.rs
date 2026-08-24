@@ -95,6 +95,22 @@ async fn handle_conn(
         }
     }
 
+    // ---- 连接/RPS 限流（DESIGN §35.2：allowlist → 认证 → conn-limit）----
+    // 超限回 503；许可持有到会话结束。
+    let _permit = match cfg.limits.as_deref() {
+        Some(limits) => match limits.acquire() {
+            Ok(permit) => Some(permit),
+            Err(rejection) => {
+                tracing::debug!(component = "gateway", %peer, ?rejection, "session rejected by limits");
+                let _ = stream
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+                    .await;
+                return;
+            }
+        },
+        None => None,
+    };
+
     // 解析请求行。
     let first_line = request_head.lines().next().unwrap_or("");
     let is_connect = first_line.starts_with("CONNECT ");
@@ -230,18 +246,21 @@ async fn dial_socks5(
             format!("upstream socks5 connect failed: rep={:#x}", head[1]),
         ));
     }
-    let skip = match head[3] {
+    // 消费 BND.ADDR/BND.PORT（4 字节头已读；此处是**剩余**字节数）。
+    // P13-C 审查修复：原实现对 0x01 把 6 当成「含头总数」只丢弃 2 字节，
+    // 每条隧道泄漏 4 个 \0 进客户端流（TLS 握手必败，E2E-03 根因）。
+    let remaining = match head[3] {
         0x01 => 6,
         0x03 => {
             let mut l = [0u8; 1];
             up.read_exact(&mut l).await?;
             l[0] as usize + 2
         }
-        0x04 => 18,
+        0x04 => 16,
         _ => 6,
     };
-    if skip > 4 {
-        let mut discard = vec![0u8; skip - 4];
+    if remaining > 0 {
+        let mut discard = vec![0u8; remaining];
         up.read_exact(&mut discard).await?;
     }
     Ok(up)

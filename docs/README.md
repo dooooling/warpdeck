@@ -27,4 +27,4 @@
 
 ## 许可证说明
 
-本仓库代码/文档采用 **MIT License**（见 [LICENSE](../LICENSE)）。镜像内嵌组件（Cloudflare WARP / GOST / 依赖包）适用各自许可证，发布再分发前需确认；SBOM 见发布产物 `scans/`。
+本仓库代码/文档采用 **MIT License**（见 [LICENSE](../LICENSE)）。镜像内嵌组件（Cloudflare WARP / 依赖包）适用各自许可证，发布再分发前需确认；SBOM 见发布产物 `scans/`。

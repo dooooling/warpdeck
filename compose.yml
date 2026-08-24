@@ -27,6 +27,9 @@ services:
       # 留空则首次启动自动生成 /var/lib/warpdeck/master.key（0600）。
       WARPDECK_MASTER_KEY: ${WARPDECK_MASTER_KEY:-}
       WARPDECK_LOG: ${WARPDECK_LOG:-info}
+      # 测试钩子直通（P13-004 / E2E-06）：置 1 时网关武装 SIGUSR1 故障注入；
+      # 生产保持为空（默认），无任何行为差异。
+      WARPDECK_GATEWAY_TEST_HOOKS: ${WARPDECK_GATEWAY_TEST_HOOKS:-}
     volumes:
       - warpdeck-data:/var/lib/warpdeck
     # /run/warpdeck 是运行时目录（D-Bus socket、PID、临时凭据窗口）——

@@ -9,7 +9,7 @@
 //! cargo xtask release [--tag T] [--proxy P]   # 构建发布镜像（默认 warpdeck:local）
 //! ```
 //!
-//! GOST/WARP 依赖在镜像构建期内由 docker/fetch-deps.sh 下载并强制 SHA256 校验
+//! WARP 依赖在镜像构建期内由 docker/fetch-deps.sh 下载并强制 SHA256 校验
 //! （单一来源 crates/xtask/src/versions.json：Dockerfile 直接从 build context
 //! COPY 后用 jq 解析，不经 --build-arg）；
 //! 中国网络下用 `--proxy socks5h://host.docker.internal:10808` 走宿主代理。

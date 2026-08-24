@@ -2,8 +2,9 @@
 # WarpDeck release image（P11-001 完整版）。
 #
 # 多阶段：node builder（vite build）→ rust builder（cargo release）→ runtime。
-# Runtime 含数据面全量：Cloudflare WARP（固定 deb）+ GOST（固定版本 + sha256）+ D-Bus
-# + CA + tini。构建期经 docker/fetch-deps.sh 下载依赖（断点续传 + cache mount 持久 +
+# Runtime 含数据面全量：Cloudflare WARP（固定 deb）+ D-Bus + CA + tini。
+# 代理数据面由进程内 builtin gateway 提供（P13-C，镜像不含 GOST）。
+# 构建期经 docker/fetch-deps.sh 下载依赖（断点续传 + cache mount 持久 +
 # 强制 SHA256 校验）；中国网络下用 --build-arg DL_PROXY=socks5h://host.docker.internal:10808
 # 走宿主代理（需代理端允许 LAN），CI/海外直连即可。
 # 入口脚本：`cargo xtask release`（crates/xtask）。URL/哈希/版本的唯一来源是
@@ -45,7 +46,7 @@ FROM ubuntu:24.04 AS runtime
 ARG WARPDECK_VERSION=0.1.0-dev
 # 构建期代理（P12-001）：如 socks5h://host.docker.internal:10808，需代理端允许 LAN；
 # 留空直连（CI/海外网络即可）。产物落 cache mount，跨构建免重复下载。
-# GOST/WARP 的 URL/SHA256/版本不设 ARG：唯一来源 = crates/xtask/src/versions.json，
+# WARP 的 URL/SHA256/版本不设 ARG：唯一来源 = crates/xtask/src/versions.json，
 # 由下方 COPY + jq 直接消费，杜绝「Dockerfile 默认值」这第二份副本。
 ARG DL_PROXY=""
 LABEL org.opencontainers.image.title="WarpDeck" \
@@ -70,17 +71,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg jq lsb-release dbus tini iproute2
 
-COPY docker/install-warp.sh docker/install-gost.sh docker/fetch-deps.sh /usr/local/bin/
+COPY docker/install-warp.sh docker/fetch-deps.sh /usr/local/bin/
 
-# versions.json 是 GOST/WARP 版本/URL/SHA256 的唯一来源；jq 仅在构建期使用，
+# versions.json 是 WARP 版本/URL/SHA256 的唯一来源；jq 仅在构建期使用，
 # 安装完成后 purge（保持 P11-003 最小镜像面不变）。
 COPY crates/xtask/src/versions.json /tmp/versions.json
 
-# P12-001(补齐 P11-002)：构建期下载 + 双重 sha256 校验（fetch-deps.sh 对下载产物、
-# EXPECTED_GOST_SHA256 传入 install-gost.sh 复核同源取值）。deb/tarball 不落镜像层：
+# P12-001(补齐 P11-002)：构建期下载 + sha256 校验。deb 不落镜像层：
 # 下载在 cache mount，安装后临时副本即弃。
 # install-warp.sh 对 deb 做"剪 GUI 依赖的重打包"(webkit/LLVM/mesa 等 ~360MB),
-# apt lists 必须留到 WARP/GOST 安装之后才清理(install-warp.sh 依赖包索引)。
+# apt lists 必须留到 WARP 安装之后才清理(install-warp.sh 依赖包索引)。
 #
 # 提取健壮性（2026-08-22 审查补强）：RUN 脚本默认无 set -e，jq 失败（键缺失输出
 # null、JSON 损坏退出非零）会静默变空串直到 fetch 阶段才费解报错——故 set -eu +
@@ -91,18 +91,12 @@ RUN --mount=type=cache,target=/dl-cache,sharing=locked \
     set -eu \
     && WARP_DEB_URL="$(jq -er '.warp.url // error("versions.json: .warp.url missing")' /tmp/versions.json)" \
     && WARP_DEB_SHA256="$(jq -er '.warp.sha256 // error("versions.json: .warp.sha256 missing")' /tmp/versions.json)" \
-    && GOST_TARBALL_URL="$(jq -er '.gost.url // error("versions.json: .gost.url missing")' /tmp/versions.json)" \
-    && GOST_TARBALL_SHA256="$(jq -er '.gost.sha256 // error("versions.json: .gost.sha256 missing")' /tmp/versions.json)" \
-    && GOST_VERSION="$(jq -er '.gost.version // error("versions.json: .gost.version missing")' /tmp/versions.json)" \
-    && EXPECTED_GOST_SHA256="${GOST_TARBALL_SHA256}" \
-    && export DL_PROXY WARP_DEB_URL WARP_DEB_SHA256 GOST_TARBALL_URL GOST_TARBALL_SHA256 GOST_VERSION EXPECTED_GOST_SHA256 \
+    && export DL_PROXY WARP_DEB_URL WARP_DEB_SHA256 \
     && bash /usr/local/bin/fetch-deps.sh "${WARP_DEB_URL}" "${WARP_DEB_SHA256}" 60000000 "/dl-cache/${WARP_DEB_URL##*/}" \
-    && bash /usr/local/bin/fetch-deps.sh "${GOST_TARBALL_URL}" "${GOST_TARBALL_SHA256}" 9000000 "/dl-cache/${GOST_TARBALL_URL##*/}" \
-    && echo 'sha256 of pinned WARP deb and GOST tarball verified' \
+    && echo 'sha256 of pinned WARP deb verified' \
     && cp "/dl-cache/${WARP_DEB_URL##*/}" /tmp/cloudflare-warp.deb \
     && bash /usr/local/bin/install-warp.sh /tmp/cloudflare-warp.deb \
-    && bash /usr/local/bin/install-gost.sh amd64 "/dl-cache/${GOST_TARBALL_URL##*/}" \
-    && rm -f /usr/local/bin/install-warp.sh /usr/local/bin/install-gost.sh /usr/local/bin/fetch-deps.sh /tmp/versions.json \
+    && rm -f /usr/local/bin/install-warp.sh /usr/local/bin/fetch-deps.sh /tmp/versions.json \
     && apt-get purge -y jq \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/lib/warpdeck /run/warpdeck
@@ -124,6 +118,6 @@ EXPOSE 9000 11080 18080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s \
   CMD curl -fsS http://127.0.0.1:9000/api/v1/health > /dev/null || exit 1
 
-# tini 作为 PID 1：正确转发信号 + 收割孤儿（warp-svc/dbus/gost 子进程）。
+# tini 作为 PID 1：正确转发信号 + 收割孤儿（warp-svc/dbus 子进程）。
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/app/warpdeck-server"]
