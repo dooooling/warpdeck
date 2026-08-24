@@ -128,8 +128,12 @@ async fn injected_serve_panic_is_recovered_by_supervision() {
     .unwrap();
 
     let (_tx, shutdown) = tokio::sync::watch::channel(false);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let runner = gw.clone();
-    tokio::spawn(async move { runner.run(shutdown).await });
+    tokio::spawn(async move { runner.run_with_ready(shutdown, Some(ready_tx)).await });
+    // 就绪通道：首次 bind 完成后才继续（否则 CI 上 connect 可能早于 bind）。
+    let bound = ready_rx.await.expect("gateway ready");
+    assert_eq!(bound, socks5_addr, "rebuild must reuse the reserved port");
 
     // 1) 正常服务。
     assert!(full_session(socks5_addr).await, "session before fault");
