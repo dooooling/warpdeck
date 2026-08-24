@@ -174,7 +174,12 @@ async fn http_absolute_uri_forwards_via_upstream() {
     c.write_all(b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n")
         .await
         .unwrap();
-    let resp = read_until_contains(&mut c, "UP:", Duration::from_secs(5)).await;
+    let resp = read_until_contains(
+        &mut c,
+        "UP:GET http://example.com/path",
+        Duration::from_secs(5),
+    )
+    .await;
     assert!(
         resp.starts_with("UP:GET http://example.com/path"),
         "request head must be forwarded through upstream, got: {resp:?}"
